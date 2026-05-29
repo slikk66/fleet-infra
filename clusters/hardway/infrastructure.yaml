@@ -1,0 +1,23 @@
+# Flux Kustomization (CRD object) — the cluster-level entrypoint that tells Flux
+# WHICH path in the repo to apply for this cluster's infrastructure layer.
+# This is a Flux object (kustomize.toolkit.fluxcd.io), distinct from the plain
+# kustomize 'kustomization.yaml' files it points at.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Source to pull from — the same GitRepository the bootstrap created.
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  # Path applied for THIS cluster.
+  path: ./infrastructure/controllers/hardway
+  # prune=true: if we delete a manifest from git, Flux deletes it from the cluster.
+  prune: true
+  # wait=true: block until applied resources report Ready (health-gates dependents).
+  wait: true
