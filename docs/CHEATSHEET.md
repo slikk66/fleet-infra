@@ -62,12 +62,63 @@ The apiserver authenticates to kubelets as user `kubernetes` but had no RBAC. Fi
   `--advertise-address=192.168.139.92`; `daemon-reload`; `restart kube-apiserver`. (backup: `*.service.bak`)
 - Result: EndpointSlice `kubernetes → 192.168.139.92:6443` published; restarted Flux pods → all 1/1 Running.
 
-### 4. DNS bootstrap chicken-and-egg (current)
-- Flux reaches the API now, but source-controller can't resolve `github.com`:
+### 4. DNS bootstrap chicken-and-egg (RESOLVED)
+- Flux reached the API but source-controller couldn't resolve `github.com`:
   `lookup github.com on 10.32.0.10:53: i/o timeout` — **no CoreDNS in the cluster**.
 - CoreDNS was intended via GitOps, but Flux needs DNS to clone the repo that *contains* CoreDNS.
-- **Resolution:** seed CoreDNS once (manual apply), then commit CoreDNS to `fleet-infra/infrastructure`
-  so Flux adopts & manages it going forward. (Standard: every cluster has a minimal bootstrap seed.)
+- **Resolution:** seeded CoreDNS once (`kubectl apply` of the same manifest now in
+  `infrastructure/controllers/base/coredns`), then committed it to git. Flux **adopted** the
+  existing objects (server-side apply, no diff) and now owns them — proven by the label
+  `kustomize.toolkit.fluxcd.io/name: infrastructure` on the coredns Deployment.
+- Pattern: every cluster needs a minimal **bootstrap seed**; GitOps takes over immediately after.
+
+---
+
+## Flux in depth (reference)
+
+### Components (the GitOps Toolkit / "gotk")
+Each controller watches one CRD and does one job:
+| Controller | Watches (CRD) | Job |
+|------------|---------------|-----|
+| source-controller | GitRepository, OCIRepository, HelmRepository, Bucket | fetch + verify, produce an internal **artifact** (tarball at a revision/sha) |
+| kustomize-controller | **Kustomization** (`kustomize.toolkit.fluxcd.io`) | build kustomize from an artifact path, **server-side apply**, prune, health-check |
+| helm-controller | HelmRelease | render + install/upgrade Helm charts |
+| notification-controller | Alert, Provider, Receiver | outbound alerts + inbound webhooks |
+
+### Two different "Kustomization" (key gotcha)
+- `kustomization.yaml`, kind `Kustomization`, group **kustomize.config.k8s.io** = plain Kustomize build file (just lists resources/patches). Inert.
+- Flux `Kustomization`, group **kustomize.toolkit.fluxcd.io** = a reconciler **object**: "from `sourceRef`, build `path`, apply with `prune`/`wait`/`interval`, ordered by `dependsOn`." This is the active piece.
+
+### What `flux bootstrap github` did (maps to its output)
+1. Cloned the repo (token, once).
+2. Generated **gotk-components.yaml** (all CRDs + controller Deployments + RBAC) → committed/pushed to `clusters/hardway/flux-system/`.
+3. Installed those components into the cluster.
+4. **Source secret**: created an SSH **deploy key**, registered the *public* key on the GitHub repo, stored the *private* key as Secret `flux-system/flux-system`.
+5. Generated **gotk-sync.yaml** = a GitRepository + a Kustomization (both named `flux-system`) → committed/pushed.
+6. Applied sync manifests → Flux now reconciles **itself** from git (components live in the repo; upgrades = bump version, commit).
+
+### Reconciliation loop
+git commit → source-controller pulls on `interval` → new artifact (sha) →
+kustomize-controller builds + server-side applies + prunes + health-checks → status in `flux get`.
+**Drift correction:** hand-edit a managed object and next reconcile reverts it to git. Git is truth.
+
+### Ordering & safety knobs (on the Flux Kustomization)
+- `prune: true` — delete-from-git ⇒ delete-from-cluster.
+- `wait: true` — block until applied resources are Ready (health-gates dependents).
+- `dependsOn:` — ordering. **apps dependsOn infrastructure** ⇒ GPU operator exists before GPU workloads.
+
+### Credentials
+Durable pull cred = **read-only SSH deploy key**, scoped to ONE repo (least privilege). The GitHub token is only used during bootstrap. Prod (Baseten-shaped) drives bootstrap from IaC with a GitHub App / machine-user PAT — same end-state deploy key.
+
+### Everyday commands
+```bash
+flux get sources git                          # is the repo fetched? at what sha?
+flux get kustomizations                        # which paths are applied + Ready?
+flux reconcile source git flux-system          # force a pull now
+flux reconcile kustomization <name> --with-source   # force pull + apply
+flux check / flux check --pre                  # controller + CRD health / preflight
+flux tree kustomization <name>                 # what objects a Kustomization manages
+```
 
 ---
 
