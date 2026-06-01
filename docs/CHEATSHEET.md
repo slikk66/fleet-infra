@@ -138,4 +138,164 @@ kubectl -n flux-system logs deploy/source-controller --tail=20
 - control-1 `192.168.139.92` (apiserver, not a registered node), worker-1 `192.168.139.161`, worker-2 `192.168.139.68`.
 - Service CIDR `10.32.0.0/24` (apiserver `10.32.0.1`, DNS `10.32.0.10`). Pod CIDR `10.200.0.0/16`.
 - IPs via `k8s-hardway/sync-hosts.sh` (updates nodes' /etc/hosts from live OrbStack IPs).
+
+---
+
+## Session 2 — GPU Operator + apps layer
+
+### OCIRepository + HelmRelease (the modern chart pipeline)
+
+```yaml
+# infrastructure/sources/base/runai-oci.yaml — the source
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata: { name: fake-gpu-operator, namespace: flux-system }
+spec:
+  interval: 30m
+  url: oci://ghcr.io/run-ai/fake-gpu-operator/fake-gpu-operator   # WITHOUT tag
+  ref: { tag: "0.0.81" }                                          # tag/semver/digest
+
+# infrastructure/controllers/base/gpu-operator/helmrelease.yaml — the consumer
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata: { name: fake-gpu-operator, namespace: gpu-operator }
+spec:
+  interval: 15m
+  chartRef:                          # MODERN form: direct source ref, no catalog lookup
+    kind: OCIRepository
+    name: fake-gpu-operator
+    namespace: flux-system           # cross-ns sourceRef is fully supported
+  install: { remediation: { retries: 3 } }
+  upgrade: { remediation: { retries: 3, remediateLastFailure: true } }
+  valuesFrom:
+    - kind: ConfigMap
+      name: gpu-operator-values      # same name in EVERY cluster overlay, different content
+```
+
+Two reconcile loops compose: source-controller pulls the OCI artifact → exposes it at `http://source-controller.flux-system.svc/...` → helm-controller fetches that tarball → renders chart with merged values → calls `helm install`. They communicate only via the source's `.status.artifact`. Inspect with:
+
+```bash
+flux get sources oci -A
+flux get helmreleases -A
+helm list -A                                  # the underlying Helm releases
+kubectl -n flux-system get ocirepository <name> -o yaml | yq '.status.artifact'
+```
+
+### OCI vs HelmRepository (classic)
+
+| OCIRepository | HelmRepository (classic) |
+|---|---|
+| `oci://ghcr.io/...` (Docker Hub, ECR, GAR, etc.) | `https://example.com/index.yaml` |
+| `chartRef:` on HR (direct) | `chart.spec.{chart,version,sourceRef}` on HR (catalog lookup) |
+| Cosign-signable, digest-immutable | No standardized signing |
+| One auth/mirror surface (image registry) | Separate HTTP-hosted catalog |
+| Modern default (Baseten-shape) | Legacy / lots of older charts still live here |
+
+### The SSA-patch + prune-disabled pattern (for pre-existing/co-owned resources)
+
+When Flux SSA-patches a resource it didn't create (Node, kube-system ns, default SA, vendor CRD), the resource enters Flux's inventory. `git rm` → next reconcile prune-deletes it. For Nodes: pod eviction storm.
+
+```yaml
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled   # Flux manages updates, never deletes
+```
+
+Pulumi analogue: `pulumi import` + `pulumi destroy` destroys the imported resource. Fix is `protect: true`. Same shape, same trap.
+
+**Apply this annotation on:** Nodes, kube-system ns, default ns, default SAs, any CRD that an operator co-manages.
+
+### SSA field ownership
+
+Each resource's `.metadata.managedFields[]` is an array, one entry per manager (`kubelet`, `kustomize-controller`, `cilium-operator-generic`, ...). Tracks per-field ownership using `f:` notation.
+
+```bash
+kubectl get node worker-1 --show-managed-fields -o yaml | yq '.metadata.managedFields[] | {"manager": .manager, "op": .operation}'
+kubectl get node worker-1 --show-managed-fields -o yaml | yq '.metadata.managedFields[] | select(.manager == "kustomize-controller") | .fieldsV1'
+```
+
+- **`Apply`** op = server-side apply (Flux + modern tooling) — declares ownership of fields.
+- **`Update`** op = imperative PUT/PATCH (legacy controllers) — also recorded as ownership.
+- **Maps tracked per-key** (labels, annotations): different managers can coexist on different keys.
+- **Some lists atomic** (whoever sets owns the whole list): containers' `args`, env vars in some setups.
+- **Conflict** = two managers want the same field → SSA refuses unless `force: true`. Flux: `kustomize.toolkit.fluxcd.io/force` annotation.
+
+### Cross-Kustomization ordering
+
+```yaml
+# clusters/hardway/apps.yaml — Flux Kustomization with dependsOn
+spec:
+  dependsOn:
+    - name: infrastructure         # apps won't START reconciling until this is Ready
+  wait: true                        # apps itself blocks until its resources are Ready
+```
+
+Combined with `wait: true` on the depended-on Kustomization, **Ready means "all resources health-pass"** (Deployments rolled, HRs `Released`, etc.). So `apps` literally cannot reconcile until the GPU operator's DaemonSets are running and advertising capacity. Bootstrap a fresh cluster → workloads automatically land in the right order.
+
+### Composition vs Overlay (kustomize)
+
+| | Composition | Overlay |
+|---|---|---|
+| `kustomization.yaml` | `resources:` only | `resources:` + transformer(s) |
+| Modifies base resources? | No (passes through) | Yes |
+| Example transformers | (none) | `patches:`, `replicas:`, `images:`, `namespace:`, `namePrefix:`, `commonLabels:`, `commonAnnotations:`, `configMapGenerator:`, `secretGenerator:` |
+
+The convenience transformers (`replicas:`, `images:`, ...) are **sugar over `patches:`**. They produce identical rendered yaml as the equivalent JSON patch — kustomize gives them dedicated keys because they're so common.
+
+Example overlay (our actual first one):
+```yaml
+# apps/hardway/kustomization.yaml
+resources:
+  - ../base/gpu-demo
+replicas:
+  - name: gpu-demo
+    count: 4
+```
+
+### GPU scheduling end-to-end chain
+
+```
+pod yaml: resources.limits.nvidia.com/gpu: 1 + nodeSelector
+   ↓
+kube-scheduler: filters nodes by capacity + selectors, picks one
+   ↓
+kubelet on chosen node: calls device-plugin gRPC (Unix socket) "Allocate 1 GPU"
+   ↓
+device-plugin: returns UUID + env vars (MOCK_NVIDIA_VISIBLE_DEVICES=...)
+   ↓
+kubelet starts container with those env vars injected
+   ↓
+container sees the env, references the (fake or real) GPU
+```
+
+Real hardware vs fake: only the device-plugin's allocation logic differs. Every other step is identical.
+
+### `flux diff` is the right preview tool
+
+```bash
+flux diff kustomization <name> --path ./path/in/repo
+```
+
+NOT `kubectl diff` from outside Flux — it false-positives on Flux's ownership-label transformer (`kustomize.toolkit.fluxcd.io/name`, `/namespace`) which stock kustomize doesn't replicate. Exits non-zero on any drift; wire into CI as a gate.
+
+### Bonus: readiness gates (where applicable)
+
+```yaml
+spec:
+  readinessGates:
+    - conditionType: target-health.elbv2.k8s.aws/<arn>   # ALB Controller, or model-warmup, or ...
+  containers: [...]
+```
+
+External controller votes INTO k8s pod readiness state. Pod is `Ready` only when readinessProbe AND every gate's condition is True. Used to prevent rolling-deploy 502s (Deployment waits to kill old pods until LB confirms new ones healthy). Baseten-relevant for model-warmup gates: don't route inference traffic until weights loaded + JIT warmed + warmup queries passed.
+
+---
+
+## State today (2026-06-01)
+
+- 3 Flux Kustomizations on hardway: `flux-system`, `infrastructure`, `apps` — all Ready.
+- 1 HelmRelease: `gpu-operator/fake-gpu-operator` @ 0.0.81.
+- 4 fake H100s in cluster (2x NVIDIA-H100-80GB-HBM3 per worker).
+- 4 gpu-demo pods bin-packed 2-per-worker, each holding a fake GPU UUID.
+- MIG deferred to Track B (real silicon).
 </content>

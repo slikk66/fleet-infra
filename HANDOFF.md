@@ -5,11 +5,12 @@
 
 ---
 
-## 0. TL;DR — current state (2026-05-29)
+## 0. TL;DR — current state (2026-06-01)
 
 - **Goal:** the user got a job at **Baseten** (AI inference, NVIDIA GPUs across 15+ clouds + bare-metal colos). This is a **hands-on learning exercise** to get fluent in **Flux (GitOps)**, **GPU scheduling / NVIDIA GPU Operator**, and **cloud-agnostic provisioning**. The user knows k8s + Argo CD + AWS well; Flux and GPU scheduling are the gaps.
 - **This is a TEACHING engagement.** The user is going concept-by-concept and wants explanations *as we build*, not just execution. Match that: explain the "why," correct misconceptions directly, keep answers concise.
-- **Where we are:** Flux is **bootstrapped and fully healthy** on the local "hardway" cluster, reconciling from `github.com/slikk66/fleet-infra`. CoreDNS is GitOps-managed. We just finished a long teaching deep-dive on Flux/Kustomize repo mechanics. **Next planned step: install the GPU Operator via a `HelmRelease`** (fake-gpu-operator first on hardway), then a GPU-scheduled app with `apps dependsOn infrastructure`.
+- **Where we are:** Flux is fully healthy on hardway. **fake-gpu-operator (v0.0.81) is installed via OCI HelmRelease** and advertising `nvidia.com/gpu: 2` per worker (2x NVIDIA-H100-80GB-HBM3 simulated, 4 total in cluster). **`apps/` layer** is wired with `dependsOn: [infrastructure]` + `wait: true`; a `gpu-demo` Deployment scales to 4 replicas, scheduler bin-packs 2 per worker, device-plugin injects `MOCK_NVIDIA_VISIBLE_DEVICES` per pod. End-to-end GPU scheduling chain proven on fake hardware.
+- **Next planned step:** Track B — Pulumi-provisioned AWS g5.xlarge spot + k3s + real NVIDIA GPU Operator + real CUDA workload. **MIG on the fake operator was deferred** (poorly documented; real MIG learning belongs on real silicon).
 
 ---
 
@@ -47,7 +48,9 @@
 
 - Bootstrapped with: `flux bootstrap github --owner=slikk66 --repository=fleet-infra --branch=main --path=clusters/hardway --private --personal` (token via `export GITHUB_TOKEN=$(gh auth token)`).
 - In-cluster: 4 controllers `1/1` in ns `flux-system`. Root `GitRepository` + `Kustomization` (both named `flux-system`) reconciling `path: ./clusters/hardway`. Cluster pulls via a **read-only SSH deploy key** (Secret `flux-system/flux-system`).
-- `flux get kustomizations` → `flux-system` and `infrastructure` both `READY=True` at `main@sha1:3ac3eb47`.
+- `flux get kustomizations` → `flux-system`, `infrastructure`, **and `apps`** all `READY=True`.
+- `flux get helmreleases -A` → `gpu-operator/fake-gpu-operator` `READY=True`, chart `0.0.81+2a66c7929b12`, "Helm install succeeded".
+- `flux get sources oci -A` → `flux-system/fake-gpu-operator` `READY=True`, revision `0.0.81@sha256:2a66c792`.
 
 ### Verify state quickly
 ```bash
@@ -60,23 +63,49 @@ kubectl get nodes
 kubectl -n kube-system get deploy coredns
 ```
 
-## 5. Repo layout (fleet-infra @ commit 3ac3eb47)
+## 5. Repo layout (fleet-infra, current)
 
 ```
 clusters/hardway/
-├── flux-system/                  # bootstrap output (DO NOT EDIT): gotk-components.yaml, gotk-sync.yaml, kustomization.yaml
-└── infrastructure.yaml           # Flux Kustomization → path infrastructure/controllers/hardway (prune+wait)
-infrastructure/controllers/
-├── base/coredns/                 # coredns.yaml + kustomization.yaml (shared base)
-└── hardway/kustomization.yaml    # overlay → ../base/coredns
+├── flux-system/                  # bootstrap output (DO NOT EDIT)
+├── infrastructure.yaml           # Flux Kustomization → infrastructure/controllers/hardway (prune+wait)
+└── apps.yaml                     # Flux Kustomization → apps/hardway (dependsOn infrastructure, wait)
+
+infrastructure/
+├── sources/base/                 # OCIRepositories / HelmRepositories — "the catalog"
+│   ├── kustomization.yaml
+│   └── runai-oci.yaml            # OCIRepository for ghcr.io/run-ai/fake-gpu-operator @ 0.0.81
+└── controllers/
+    ├── base/
+    │   ├── coredns/              # CoreDNS Deployment+Service+CM+RBAC (shared)
+    │   └── gpu-operator/         # Namespace + HelmRelease (shared base)
+    │       ├── namespace.yaml
+    │       ├── helmrelease.yaml  # chartRef → OCIRepository; valuesFrom CM gpu-operator-values
+    │       └── kustomization.yaml
+    └── hardway/
+        ├── kustomization.yaml    # composes ../../sources/base + ../base/coredns + ../base/gpu-operator + local files
+        ├── gpu-nodes.yaml        # Node SSA-patches: label workers, prune-disabled (Nodes are co-owned w/ kubelet)
+        └── gpu-operator-values.yaml  # ConfigMap: H100 topology (2x NVIDIA-H100-80GB-HBM3, 81559 MiB) — per-cluster
+
+apps/
+├── base/gpu-demo/
+│   ├── namespace.yaml            # ns: gpu-apps
+│   ├── deployment.yaml           # 1 replica, requests nvidia.com/gpu: 1, nodeSelector H100
+│   └── kustomization.yaml
+└── hardway/
+    └── kustomization.yaml        # FIRST REAL OVERLAY: replicas: transformer bumps gpu-demo to 4 replicas
+
 docs/CHEATSHEET.md                # teaching log + Flux/Kustomize/Terraform-mapping reference
 HANDOFF.md                        # this file
 ```
-Reconcile chain: root Kustomization (gotk-sync.yaml, `path: ./clusters/hardway`) → auto-scan picks up `flux-system/` + `infrastructure.yaml` → `infrastructure.yaml` points to `infrastructure/controllers/hardway` → `../base/coredns`.
 
-### Uncommitted working-tree changes (commit these or fold into next work)
-- `docs/CHEATSHEET.md` — expanded with the Flux deep-dive + CoreDNS-adoption update (edited after commit 3ac3eb47).
-- `HANDOFF.md` — this new file.
+Reconcile chain:
+1. Root Flux Kustomization (`gotk-sync.yaml`, `path: ./clusters/hardway`) auto-scans the dir → picks up `infrastructure.yaml` + `apps.yaml`.
+2. `infrastructure.yaml` (Flux Kustomization) → `infrastructure/controllers/hardway/kustomization.yaml` (kustomize composition).
+3. `apps.yaml` (Flux Kustomization, `dependsOn: [infrastructure]`, `wait: true`) → `apps/hardway/kustomization.yaml`.
+4. `infrastructure` reconciles `OCIRepository` (source-controller pulls chart from ghcr.io) + `HelmRelease` (helm-controller installs chart) + Node patches.
+5. `apps` waits for `infrastructure` Ready → applies `gpu-demo` Deployment (4 replicas via overlay's `replicas:` transformer).
+6. Result: 4 GPU-requesting pods scheduled 2 per worker, fake-gpu-operator's device-plugin allocates a UUID per pod.
 
 ## 6. Decisions locked
 
@@ -87,12 +116,13 @@ Reconcile chain: root Kustomization (gotk-sync.yaml, `path: ./clusters/hardway`)
 
 ## 7. NEXT STEPS (in order)
 
-1. **Commit the uncommitted cheat-sheet + this handoff.**
-2. **GPU Operator via HelmRelease (the big unlearned pattern).** Add `infrastructure/controllers/base/<op>` + a `HelmRepository`/`OCIRepository` + `HelmRelease`. Start with **run-ai/fake-gpu-operator** (or `kind-gpu-sim`) on hardway to learn GPU scheduling *without* real hardware (it advertises `nvidia.com/gpu` via KWOK; label nodes per its README). Explain HelmRelease/HelmRepository model as you go.
-3. **`apps/` layer + ordering.** Add `clusters/hardway/apps.yaml` (Flux Kustomization) with **`dependsOn: [infrastructure]`** and `wait: true`. Add a GPU-scheduled demo pod (`resources.limits: nvidia.com/gpu: 1`, plus taints/tolerations/nodeSelector). Watch Flux order infra→apps.
-4. **Per-cluster customization:** demonstrate `postBuild.substituteFrom` and/or a kustomize `patches:`/`replicas:`/`images:` overlay so `hardway` vs `aws-gpu` differ from a shared base.
-5. **Track B:** Pulumi TS to provision the g5 spot box + k3s + IaC Flux bootstrap + real GPU Operator + a real CUDA/vLLM workload. Tear down with `pulumi destroy` to control cost.
-6. **Sprinkles when ready:** SOPS for a secret; image-automation for a model-server image; an Alert/Provider for Slack.
+1. ~~**Commit pending docs.**~~ ✓ Done.
+2. ~~**GPU Operator via HelmRelease.**~~ ✓ Done — fake-gpu-operator v0.0.81 on hardway as OCI HelmRelease; H100 topology in per-cluster CM; 4 fake H100s advertised.
+3. ~~**`apps/` layer + ordering.**~~ ✓ Done — `apps.yaml` with `dependsOn: [infrastructure]` + `wait: true`; `gpu-demo` Deployment scheduled with `nvidia.com/gpu: 1` request + H100 nodeSelector; scaled to 4 replicas via overlay's `replicas:` transformer (the first **real** overlay vs the composition we'd been doing); device-plugin injects `MOCK_NVIDIA_VISIBLE_DEVICES` per pod.
+4. **Per-cluster customization (partial).** We have the CM-split pattern for values, and one `replicas:` transformer. Still untouched: `postBuild.substituteFrom`, `images:` transformer, `patches:` for env vars / replicas mid-spec. Practice these on Track B where two clusters differ for real reasons.
+5. **MIG — DEFERRED to Track B.** fake-gpu-operator's MIG config is undocumented in the chart; not worth reverse-engineering. Real NVIDIA GPU Operator on real A10G/H100 silicon has mature, documented MIG config — learn it there.
+6. **Track B (NEXT).** Pulumi TS to provision g5.xlarge spot + k3s + Flux bootstrap via Pulumi/Terraform Flux provider + real NVIDIA GPU Operator + a real CUDA workload (vLLM or simple `nvidia-smi`). Tear down with `pulumi destroy` to control cost. Reconcile from `clusters/aws-gpu/` in this same fleet repo.
+7. **Sprinkles when ready:** SOPS for a secret; image-automation for a model-server image; an Alert/Provider for Slack. Save until after Track B end-to-end.
 
 ## 8. Known gaps / risks to remember
 
@@ -111,4 +141,15 @@ Reconcile chain: root Kustomization (gotk-sync.yaml, `path: ./clusters/hardway`)
 
 ## 10. Conceptual ground already covered (don't re-teach unless asked)
 
-GitOps reconciliation model; bootstrap (one-time imperative seed) vs ongoing pull-based reconcile; `gotk-components.yaml` vs `gotk-sync.yaml`; deploy key vs HTTPS token (two creds); repo anatomy (clusters vs infrastructure vs apps; why flux-system lives in clusters/); kustomize base/overlay; the **two `kind: Kustomization`** (apiGroup `kustomize.config.k8s.io` = plain build file vs `kustomize.toolkit.fluxcd.io` = Flux reconciler); auto-scan (no kustomization.yaml) vs allowlist (has one); Terraform↔Flux mental mapping (modules≈bases, patches-not-inputs, continuous-reconcile-not-apply, no state file, prune≈destroy); how fleets bootstrap at scale (IaC/CAPI/flux-operator, "born GitOps-managed", hub-spoke); why Baseten is multi-cloud (GPU scarcity → bin-pack to ~95% util, NOT elastic autoscaling) and that the portable layer (Flux + GPU Operator) matters more than EKS/Karpenter specifics.
+**Foundations (session 1):** GitOps reconciliation model; bootstrap (one-time imperative seed) vs ongoing pull-based reconcile; `gotk-components.yaml` vs `gotk-sync.yaml`; deploy key vs HTTPS token (two creds); repo anatomy (clusters vs infrastructure vs apps; why flux-system lives in clusters/); kustomize base/overlay; the **two `kind: Kustomization`** (apiGroup `kustomize.config.k8s.io` = plain build file vs `kustomize.toolkit.fluxcd.io` = Flux reconciler); auto-scan (no kustomization.yaml) vs allowlist (has one); Terraform↔Flux mental mapping (modules≈bases, patches-not-inputs, continuous-reconcile-not-apply, no state file, prune≈destroy); how fleets bootstrap at scale (IaC/CAPI/flux-operator, "born GitOps-managed", hub-spoke); why Baseten is multi-cloud (GPU scarcity → bin-pack to ~95% util, NOT elastic autoscaling) and that the portable layer (Flux + GPU Operator) matters more than EKS/Karpenter specifics.
+
+**Today (session 2):**
+- **HelmRelease + OCIRepository**: source-controller fetches OCI artifact via `OCIRepository` → produces in-cluster artifact at `http://source-controller.flux-system.svc.cluster.local`; helm-controller fetches that → runs `helm install`. `chartRef:` (modern, for OCI/Git) vs `chart.spec.sourceRef:` (classic, HelmRepository catalog lookup). Why OCI: one auth/mirror surface, cosign-signable, immutable digests. Modern Baseten-shape default.
+- **Cross-namespace `valuesFrom`**: HR in `gpu-operator` references CM by **static name** that lives in cluster overlay. Same name in every cluster overlay → different content → per-cluster values without forking the HR.
+- **The Import-Trap of `prune: true`**: when Flux patches a pre-existing resource (e.g. Node) via SSA, that resource enters Flux's inventory. `git rm` → next reconcile prune-deletes the resource. For Nodes, that means `kubectl delete node` → eviction storm → kubelet re-registers blank → labels gone. Mitigation: `kustomize.toolkit.fluxcd.io/prune: disabled` annotation. Same shape as Pulumi `import` + `pulumi destroy`; fix is `protect: true` in Pulumi, this annotation in Flux. **Use on any pre-existing or co-owned resource** (Nodes, kube-system ns, default ns, default SAs, vendor CRDs).
+- **SSA field ownership**: every resource has a `managedFields` array tracking per-key ownership across managers (`kubelet`, `cilium-operator-generic`, `kube-controller-manager`, `kustomize-controller`, etc.). Maps (labels/annotations) tracked per-key; some lists atomic. `Apply` op (SSA) coexists with `Update` op (legacy clients). Conflicts when two managers claim same key → SSA refuses unless `force` set. Inspect via `kubectl get <obj> --show-managed-fields -o yaml`.
+- **Composition vs overlay (kustomize)**: Pulling `resources:` from a base path is composition — base resources pass through unchanged. *Overlay* requires a transformer (`patches:`, `replicas:`, `images:`, `namespace:`, `namePrefix:`, `commonLabels:`) that *modifies* what was pulled in. `replicas:` and friends are sugar over `patches:`. Our `apps/hardway/` got its first real overlay via `replicas:`.
+- **Cross-Flux-Kustomization ordering**: `dependsOn:` gates reconcile-start; `wait: true` on the depended-on Kustomization makes "Ready" mean "all resources health-pass." Together: GPU operator's DaemonSets must be Ready before any apps requesting `nvidia.com/gpu` reconcile.
+- **GPU scheduling end-to-end**: pod requests `nvidia.com/gpu: 1` + `nodeSelector: nvidia.com/gpu.product=...` → kube-scheduler picks node with capacity + matching label → kubelet asks device-plugin (gRPC over unix socket) "allocate 1 GPU" → device-plugin returns UUID + env vars → kubelet injects into pod env → container sees `MOCK_NVIDIA_VISIBLE_DEVICES=...`. On real hardware the chain is identical; only the device-plugin's allocation logic is different.
+- **`flux diff kustomization`** is the right preview tool (not `kubectl diff` from outside Flux, which false-positives on Flux's ownership-label transformer). Exits non-zero on any drift — wire into CI as a gate.
+- **Readiness gates**: `spec.readinessGates` lets external controllers vote into pod Ready. Direction: gate is from the LB controller INTO k8s readiness state (not from k8s into the LB). Prevents rolling-deploy 502s by making Deployment wait to kill old pods until ALB confirms new ones are in rotation. Baseten-relevant for model-warmup gates (don't route inference traffic until weights loaded + JIT warmed).
