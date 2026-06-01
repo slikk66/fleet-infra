@@ -18,4 +18,4 @@ spec:
       remediateLastFailure: true
   valuesFrom:
     - kind: ConfigMap
-      name: gpu-operator-values
+      name: fake-gpu-operator-values

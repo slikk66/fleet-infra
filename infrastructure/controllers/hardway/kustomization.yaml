@@ -5,6 +5,6 @@ kind: Kustomization
 resources:
   - ../../sources/base
   - ../base/coredns
-  - ../base/gpu-operator
+  - ../base/fake-gpu-operator
   - gpu-nodes.yaml
-  - gpu-operator-values.yaml
+  - fake-gpu-operator-values.yaml
