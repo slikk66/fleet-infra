@@ -1,0 +1,17 @@
+# Per-cluster fake-gpu-operator values for the hardway cluster.
+# Simulates 2x NVIDIA H100 80GB SXM per worker node. The base HelmRelease
+# references this ConfigMap by name; each cluster overlay supplies its own
+# content for the same name (gpu-operator-values).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-operator-values
+  namespace: gpu-operator
+data:
+  values.yaml: |
+    topology:
+      nodePools:
+        default:
+          gpuProduct: NVIDIA-H100-80GB-HBM3
+          gpuCount: 2
+          gpuMemory: 81559
