@@ -3,5 +3,6 @@ kind: Kustomization
 # Per-cluster overlay for the "hardway" cluster's infrastructure controllers.
 # Add cluster-specific controllers / patches here; shared definitions live in ../base.
 resources:
+  - ../../sources/base
   - ../base/coredns
   - gpu-nodes.yaml
