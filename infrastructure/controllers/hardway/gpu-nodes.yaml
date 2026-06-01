@@ -1,0 +1,22 @@
+# Patches pre-existing Node objects to add the fake-gpu-operator
+# discovery label. The prune-disabled annotation is REQUIRED: Nodes are
+# co-owned with kubelet; deleting this file from git must NOT cause Flux
+# to delete the Node API objects (which would evict all pods on them).
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: worker-1
+  labels:
+    run.ai/simulated-gpu-node-pool: default
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: worker-2
+  labels:
+    run.ai/simulated-gpu-node-pool: default
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
