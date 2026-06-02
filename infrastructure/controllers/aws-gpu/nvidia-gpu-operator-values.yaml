@@ -1,10 +1,12 @@
 # Per-cluster GPU Operator values for the aws-gpu (k3s) cluster.
-# The ONLY override needed vs chart defaults: tell the container-toolkit where
-# k3s keeps containerd. k3s uses a non-standard socket and regenerates its
-# config from a .tmpl template — point the toolkit at the real paths or the
-# `nvidia` runtime never registers and GPU pods fail to start.
-# (driver.enabled and cdi.enabled are already true by default in v26.3.2, so
-# operator-managed driver + CDI injection need no override here.)
+#
+# k3s 1.33 ships containerd 2.x (CRI 'v1' config schema). The operator's bundled
+# container-toolkit writes the old schema and clobbers k3s's inline CNI config,
+# taking the node NotReady. So on k3s we let the HOST own the driver + runtime:
+#   - cloud-init installs the NVIDIA driver + nvidia-container-toolkit
+#   - k3s natively detects nvidia-container-runtime and writes a CNI-safe config
+# and the operator runs only its discovery/scheduling/telemetry pieces
+# (NFD, GFD, device-plugin, dcgm-exporter, validators).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,13 +14,11 @@ metadata:
   namespace: gpu-operator
 data:
   values.yaml: |
+    # Driver is pre-installed on the host (cloud-init) — don't let the operator
+    # deploy its driver container.
+    driver:
+      enabled: false
+    # Runtime is pre-installed on the host and wired by k3s — don't let the
+    # operator's toolkit rewrite containerd (that's what broke the node).
     toolkit:
-      env:
-        - name: CONTAINERD_CONFIG
-          value: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
-        - name: CONTAINERD_SOCKET
-          value: /run/k3s/containerd/containerd.sock
-        - name: CONTAINERD_RUNTIME_CLASS
-          value: nvidia
-        - name: CONTAINERD_SET_AS_DEFAULT
-          value: "true"
+      enabled: false
