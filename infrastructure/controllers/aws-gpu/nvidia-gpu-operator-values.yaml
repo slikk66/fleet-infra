@@ -1,0 +1,24 @@
+# Per-cluster GPU Operator values for the aws-gpu (k3s) cluster.
+# The ONLY override needed vs chart defaults: tell the container-toolkit where
+# k3s keeps containerd. k3s uses a non-standard socket and regenerates its
+# config from a .tmpl template — point the toolkit at the real paths or the
+# `nvidia` runtime never registers and GPU pods fail to start.
+# (driver.enabled and cdi.enabled are already true by default in v26.3.2, so
+# operator-managed driver + CDI injection need no override here.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-gpu-operator-values
+  namespace: gpu-operator
+data:
+  values.yaml: |
+    toolkit:
+      env:
+        - name: CONTAINERD_CONFIG
+          value: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+        - name: CONTAINERD_SOCKET
+          value: /run/k3s/containerd/containerd.sock
+        - name: CONTAINERD_RUNTIME_CLASS
+          value: nvidia
+        - name: CONTAINERD_SET_AS_DEFAULT
+          value: "true"

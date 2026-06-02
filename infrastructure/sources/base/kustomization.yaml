@@ -4,3 +4,4 @@ kind: Kustomization
 # Per-cluster overlays reference this base so every cluster pulls the same artifacts.
 resources:
   - runai-oci.yaml
+  - nvidia-helm.yaml

@@ -1,0 +1,14 @@
+# NGC public Helm repo for the real NVIDIA GPU Operator.
+# Traditional HTTP Helm repo (no auth) — the nvcr.io OCI chart registry now
+# requires an NGC token, so we pull the chart from here instead. The component
+# images the chart deploys still pull anonymously from nvcr.io/nvidia.
+# Lives in the shared sources catalog; only clusters with real GPUs reference a
+# HelmRelease against it (aws-gpu), so on other clusters it's an idle index.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: nvidia
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://helm.ngc.nvidia.com/nvidia

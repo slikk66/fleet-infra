@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Shared base for the real NVIDIA GPU Operator HelmRelease + its namespace.
+# Per-cluster overlays supply a nvidia-gpu-operator-values ConfigMap that the
+# HR references via valuesFrom (e.g. distro-specific containerd paths).
+resources:
+  - namespace.yaml
+  - helmrelease.yaml

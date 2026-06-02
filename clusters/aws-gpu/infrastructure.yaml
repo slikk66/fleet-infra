@@ -1,0 +1,20 @@
+# Cluster-level entrypoint for aws-gpu's infrastructure layer.
+# Same shape as clusters/hardway/infrastructure.yaml, but timeout is bumped to
+# 10m: the GPU Operator pulls several large images on first install.
+# (apps.yaml is intentionally NOT created yet — we land + verify the operator
+# before wiring an apps tier that would point at a not-yet-existing apps/aws-gpu.)
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 10m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./infrastructure/controllers/aws-gpu
+  prune: true
+  wait: true
