@@ -1,13 +1,19 @@
-# ClusterIP for the OpenAI-compatible API. Test via `kubectl port-forward`.
+# NodePort for the OpenAI-compatible API: reachable at <node-public-ip>:30800.
+# (Still has a ClusterIP for in-cluster clients — NodePort is a superset.)
+# NOTE: nodePort 30800 must match the SG ingress rule in infra/network.tf. This is
+# the infra/GitOps split in action: the Service (exposure) is GitOps; opening the
+# port in the security group is Terraform.
 apiVersion: v1
 kind: Service
 metadata:
   name: vllm-phi3
   namespace: gpu-apps
 spec:
+  type: NodePort
   selector:
     app: vllm-phi3
   ports:
     - name: http
       port: 8000
       targetPort: 8000
+      nodePort: 30800
