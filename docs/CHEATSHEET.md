@@ -14,16 +14,16 @@ A global scheduler (Baseten's "MCM") sits above per-cluster Flux. We're learning
 
 | Repo | Location | Role | Pushed? |
 |------|----------|------|---------|
-| `flux-gpu-trainer` | local only | workbench: hard-way PKI/scripts, Pulumi IaC, notes | never |
-| `fleet-infra` | github.com/slikk66 (private) | GitOps source of truth + Pulumi IaC | yes |
+| `flux-gpu-trainer` | local only | workbench: hard-way PKI/scripts, Terraform IaC, notes | never |
+| `fleet-infra` | github.com/slikk66 (private) | GitOps source of truth | yes |
 
-`fleet-infra` layout (Flux monorepo): `clusters/<name>/` (entrypoints) · `infrastructure/controllers/{base,<cluster>}` · `apps/{base,<cluster>}` · `iac/` (Pulumi).
+`fleet-infra` layout (Flux monorepo): `clusters/<name>/` (entrypoints) · `infrastructure/controllers/{base,<cluster>}` · `apps/{base,<cluster>}`. Track B's Terraform lives in the **workbench** repo's `iac/aws-gpu/` (not in fleet-infra).
 Reconcile order per cluster: **infrastructure before apps**.
 
 ## Clusters
 
 - **hardway** — "Kubernetes the hard way" on OrbStack Ubuntu arm64 VMs (control-1 + worker-1/2). Cilium CNI w/ kube-proxy replacement. ≈ the "bare-metal / colo" experience.
-- **aws-gpu** (planned) — g5.xlarge (A10G) **spot**, us-west-2, k3s, real NVIDIA GPU Operator. ≈ the "managed cloud" experience. Both reconcile the *same* infra/apps from `fleet-infra`.
+- **aws-gpu** — g5.xlarge (A10G), us-west-2, k3s 1.33, real NVIDIA GPU Operator (device-plugin-only; driver+toolkit host-managed — see Session 4). Terraform-provisioned. **On-demand** (~$1.21/hr; spot capacity unavailable). ≈ the "managed cloud" experience. Both reconcile from `fleet-infra`.
 
 ---
 
@@ -298,4 +298,128 @@ External controller votes INTO k8s pod readiness state. Pod is `Ready` only when
 - 4 fake H100s in cluster (2x NVIDIA-H100-80GB-HBM3 per worker).
 - 4 gpu-demo pods bin-packed 2-per-worker, each holding a fake GPU UUID.
 - MIG deferred to Track B (real silicon).
+
+---
+
+## Session 3 — Terraform (IaC for Track B / aws-gpu)
+
+### Why Terraform (not Pulumi)
+Baseten uses Terraform → decision locked. (Pulumi was the original workbench choice, dropped.)
+
+### Native S3 state locking (no DynamoDB)
+```hcl
+# backend.tf
+terraform {
+  backend "s3" {
+    bucket       = "billeci-state-upgraded"
+    key          = "terraform/aws-gpu/infra/terraform.tfstate"
+    region       = "us-west-2"
+    use_lockfile = true     # native S3 lock (TF 1.11+). A .tflock object next to state. No DynamoDB.
+    encrypt      = true
+  }
+}
+```
+Pre-1.11 required a DynamoDB table for the lock. `use_lockfile=true` is a conditional-write `.tflock` object in the same bucket. One less resource.
+
+### Two-stack split + cross-stack refs
+Separate state files: `iac/aws-gpu/infra/` (VPC/EC2/IAM/k3s) and `iac/aws-gpu/flux-bootstrap/` (deploy key + flux). **Why split:**
+- `flux_bootstrap_git` and Flux itself both touch gotk-* resources. One combined stack → perpetual diff churn (TF keeps wanting to "fix" what Flux manages).
+- Split = infra stays stable; flux-bootstrap is the only stack re-run on Flux changes.
+
+flux-bootstrap reads infra outputs **read-only**:
+```hcl
+data "terraform_remote_state" "infra" {
+  backend = "s3"
+  config  = { bucket = "billeci-state-upgraded", key = "terraform/aws-gpu/infra/terraform.tfstate", region = "us-west-2" }
+}
+# use: data.terraform_remote_state.infra.outputs.kubeconfig_path
+```
+Convention: infra emits filesystem paths via `abspath()` so flux-bootstrap resolves them from a different working dir.
+
+### Canonical Flux + Terraform bootstrap (SSH-only)
+```hcl
+resource "tls_private_key" "deploy" { algorithm = "ECDSA"; ecdsa_curve = "P256" }
+resource "github_repository_deploy_key" "this" {
+  repository = "fleet-infra"; title = "flux-aws-gpu"
+  key       = tls_private_key.deploy.public_key_openssh
+  read_only = false            # WRITEABLE — flux_bootstrap_git must COMMIT gotk files
+}
+resource "flux_bootstrap_git" "this" {
+  path = "clusters/aws-gpu"; version = "v2.8.8"
+  # flux provider configured with git { url = "ssh://...", ssh { private_key = tls_private_key.deploy... } }
+}
+```
+- **PAT consumed once** by the `github` provider to register the deploy key. After that, *all* git auth is the SSH key. PAT never enters the cluster.
+- Deploy key is **writeable** here (vs hardway's read-only) because `flux_bootstrap_git` *commits* the gotk manifests.
+- PAT lives in `flux-bootstrap/terraform.tfvars` (gitignored, mode 600), fine-grained, one-repo scope (Contents R/W + Administration R/W).
+
+---
+
+## Session 4 — Real GPU on k3s (the hard lessons)
+
+### NFD vs GFD vs nvidia-smi (who labels the node)
+| Layer | What it does |
+|---|---|
+| **nvidia-smi** | host CLI → kernel driver. Ground truth: "is there a GPU + which driver". |
+| **NFD** (Node Feature Discovery) | generic node labels (CPU/kernel/PCI). Detects NVIDIA PCI vendor → `feature.node.kubernetes.io/pci-10de.present=true`. |
+| **GFD** (GPU Feature Discovery) | NVIDIA-specific labels: `nvidia.com/gpu.product`, `.count`, `.memory`, MIG geometry. |
+
+Operator two-step: **discover → operator stamps `nvidia.com/gpu.deploy.*` labels → operands schedule.** NFD/GFD discover hardware; the operator reads those labels to decide which DaemonSets (driver/toolkit/device-plugin/dcgm/validator) to place.
+
+**declare vs discover:** fake operator (hardway) → we **hand-label** nodes (`gpu-nodes.yaml` SSA-patch). Real operator (aws-gpu) → GFD **discovers** the A10G; no hand-labels, silicon is truth.
+
+### ⚠️ THE BIG TRAP: GPU Operator toolkit breaks k3s 1.33
+- k3s 1.33 ships **containerd 2.x** → CRI schema **`io.containerd.cri.v1`** (CRI v1).
+- The operator's bundled **container-toolkit** (v1.19.1) rewrote containerd config in the **old `version=2` / `io.containerd.grpc.v1.cri`** schema AND replaced k3s's monolithic config, **dropping k3s's inline CNI `bin_dir`/`conf_dir`**.
+- Result: CNI never initialized → **node NotReady, every pod `cni plugin not initialized`** (~3 min after operator install).
+
+### The fix — Path A (host-managed driver + toolkit)
+- **cloud-init installs the NVIDIA driver (`cuda-drivers` DKMS) + `nvidia-container-toolkit` BEFORE k3s.**
+- k3s then **natively detects** `nvidia-container-runtime` and writes its OWN correct, CNI-safe containerd config — with `nvidia` + `nvidia-cdi` runtimes and a built-in `nvidia` RuntimeClass.
+- GPU Operator runs **`driver.enabled=false` + `toolkit.enabled=false`** → only NFD/GFD/device-plugin/dcgm/validators. **No** `nvidia-driver-daemonset` / `nvidia-container-toolkit-daemonset`.
+- Canonical k3s GPU recipe. Operator-everything is genuinely incompatible with this k3s/containerd combo.
+- GPU pods set **`runtimeClassName: nvidia`** (selects the host runtime; without it the toolkit prestart hook never runs → no devices in the container).
+
+Success signatures:
+```bash
+kubectl get runtimeclass                                          # nvidia present → k3s saw host toolkit
+kubectl get node -o jsonpath='{...allocatable.nvidia\.com/gpu}'    # 1
+kubectl get ds -n gpu-operator | grep -E 'driver|toolkit'         # EMPTY (host-managed)
+```
+
+### HelmRepository (NGC) vs OCIRepository (nvcr.io 403)
+- nvcr.io's **OCI chart** registry now **403s without an NGC token** (component *images* still pull anonymously).
+- So the GPU Operator chart comes from the classic **HelmRepository** `https://helm.ngc.nvidia.com/nvidia` (public):
+```yaml
+# HelmRelease, chart.spec form (HTTP catalog lookup) — NOT chartRef
+spec:
+  chart:
+    spec:
+      chart: gpu-operator
+      version: v26.3.2
+      sourceRef: { kind: HelmRepository, name: nvidia, namespace: flux-system }
+```
+Contrast the fake operator (session 2) using `chartRef:` → OCIRepository. **`chart.spec` = HTTP repo + catalog lookup; `chartRef` = direct OCI/Helm source ref.**
+
+### Spot `InsufficientInstanceCapacity` silent-retry
+g5.xlarge spot in us-west-2a was exhausted. Signature: `RunInstances` **loops silently** on `InsufficientInstanceCapacity` — no instance, no spot request, just Terraform "Still creating...". Fallback = comment out `instance_market_options` → on-demand (~$1.21/hr vs ~$0.63 spot that day).
+
+### rtk caveat extends beyond git
+The `rtk` hook truncates/mangles stdout for `git`, `helm`, `aws`, `kubectl`, `grep`, `wc`. Workarounds: `rtk proxy <cmd>` for raw output, call binaries by absolute path (`/usr/bin/grep`), or use the Read tool for files.
+
+---
+
+## Session 5 — Track B rebuilt + GitOps-native GPU proof (2026-06-03)
+
+Rebuilt aws-gpu from scratch on the corrected Path A design. Came up clean:
+- node Ready and **stayed** Ready (the old break took it NotReady ~3 min after operator install).
+- `nvidia` RuntimeClass auto-created; `nvidia.com/gpu` allocatable = 1; **no** driver/toolkit daemonsets.
+- host driver: **A10G, 610.43.02, CUDA UMD 13.3, 23 GB**.
+
+### Pattern: smoke test as a Flux health-gate
+Instead of imperative `kubectl run`, the smoke test is a **GitOps-managed Job** (`apps/aws-gpu/gpu-smoke-test.yaml`) running `nvidia-smi` with `nvidia.com/gpu:1` + `runtimeClassName: nvidia`. The parent `apps` Kustomization sets **`wait: true`**, so Flux health-checks the Job — and a Job is "Ready" only when it **Completes successfully**. Therefore:
+
+> **`apps` Kustomization goes READY iff `nvidia-smi` exits 0 on the GPU.** The reconciliation *is* the proof, and it re-proves automatically on every rebuild — no out-of-band verification.
+
+Same `dependsOn`+`wait` machinery from session 2, now used as a deliberate hardware-validation gate.
 </content>
