@@ -1,0 +1,75 @@
+# vLLM serving Phi-3-mini-4k-instruct on the A10G, OpenAI-compatible API on :8000.
+# Option A (direct-from-HF): on first boot vLLM pulls ~7.6GB from the HuggingFace Hub
+# into HF_HOME=/models (the PVC). No S3, no init container, no AWS creds in the pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-phi3
+  namespace: gpu-apps
+spec:
+  replicas: 1
+  # Model load holds the GPU exclusively — don't run two pods fighting over 1 GPU
+  # during a rollout. Recreate = old pod dies before new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-phi3
+  template:
+    metadata:
+      labels:
+        app: vllm-phi3
+    spec:
+      runtimeClassName: nvidia          # host-managed nvidia runtime (see CHEATSHEET §4)
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.22.0
+          # Invoke the api_server module directly rather than relying on the image
+          # ENTRYPOINT (which has shifted between `vllm serve` and the module path
+          # across releases) — this is stable and unambiguous.
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - --model=microsoft/Phi-3-mini-4k-instruct
+            - --served-model-name=phi-3-mini
+            - --max-model-len=4096
+            - --gpu-memory-utilization=0.90
+            - --host=0.0.0.0
+            - --port=8000
+          env:
+            - name: HF_HOME             # send the HF hub cache to the PVC
+              value: /models
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi
+            limits:
+              nvidia.com/gpu: 1         # also pins the pod to the GPU device-plugin
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm                 # vLLM's multiprocessing backend needs >64Mi /dev/shm
+              mountPath: /dev/shm
+          # Image pull (~10GB) + first-boot HF download + model load is slow; the
+          # startupProbe gives it up to 20 min before liveness/readiness kick in.
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            failureThreshold: 80
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 6
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: vllm-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi

@@ -1,8 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Per-cluster app composition for aws-gpu.
-# First managed workload: a one-shot GPU smoke test (nvidia-smi on the real A10G).
-# vLLM serving lands here next.
+# Managed workloads:
+#  - gpu-smoke-test: one-shot nvidia-smi Job (GPU-schedulable proof)
+#  - vllm: Phi-3-mini-4k served via vLLM (OpenAI API), real inference workload
 resources:
   - namespace.yaml
   - gpu-smoke-test.yaml
+  - vllm

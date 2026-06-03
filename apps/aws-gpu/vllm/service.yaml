@@ -1,0 +1,13 @@
+# ClusterIP for the OpenAI-compatible API. Test via `kubectl port-forward`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-phi3
+  namespace: gpu-apps
+spec:
+  selector:
+    app: vllm-phi3
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

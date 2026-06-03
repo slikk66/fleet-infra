@@ -1,0 +1,14 @@
+# HF model cache. local-path (k3s default) = a dir on the node's EBS root volume.
+# Survives pod restarts (no re-download); lost on node replacement — see CHEATSHEET
+# "node-replacement durability gap". ReadWriteOnce is all local-path supports.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-model-cache
+  namespace: gpu-apps
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 25Gi

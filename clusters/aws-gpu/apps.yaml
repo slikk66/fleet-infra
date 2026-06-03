@@ -10,7 +10,9 @@ metadata:
 spec:
   interval: 10m
   retryInterval: 2m
-  timeout: 5m
+  # 20m: first reconcile waits on vLLM, which pulls a ~10GB image + ~7.6GB of
+  # weights from HF before /health passes. 5m would false-timeout the wait gate.
+  timeout: 20m
   sourceRef:
     kind: GitRepository
     name: flux-system
