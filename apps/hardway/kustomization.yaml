@@ -5,6 +5,7 @@ kind: Kustomization
 # (2 workers × 2 GPUs each) — demonstrates bin-packing across the fleet.
 resources:
   - ../base/gpu-demo
+  - demo.secret.yaml          # SOPS-encrypted; decrypted by Flux at apply time
 replicas:
   - name: gpu-demo
     count: 4

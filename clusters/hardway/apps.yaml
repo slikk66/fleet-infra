@@ -13,3 +13,10 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
+  # Tell kustomize-controller to SOPS-decrypt resources before applying, using the
+  # age private key in Secret flux-system/sops-age (key file *.agekey). Without this,
+  # the encrypted Secret would be applied verbatim (ENC[...] values) and be useless.
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age

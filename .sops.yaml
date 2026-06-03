@@ -1,0 +1,11 @@
+# SOPS creation rules. `sops --encrypt` consults this to decide what/how/for-whom.
+# - path_regex: only files ending `.secret.yaml` are treated as encryptable.
+# - encrypted_regex: encrypt ONLY the Secret values (data/stringData); leave
+#   apiVersion/kind/metadata in cleartext so kustomize can process them and git
+#   diffs stay meaningful.
+# - age: the PUBLIC recipient. Cloud-agnostic (no KMS) -> same ciphertext decrypts
+#   on any cluster in any cloud that holds the matching private key.
+creation_rules:
+  - path_regex: .*\.secret\.yaml$
+    encrypted_regex: ^(data|stringData)$
+    age: age1u4zkw3fuzlf6rjafrcwphsvl57nlwawue24fehd2mahny946py6s5h9269
