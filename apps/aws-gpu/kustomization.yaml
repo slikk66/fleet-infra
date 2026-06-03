@@ -2,9 +2,12 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Per-cluster app composition for aws-gpu.
 # Managed workloads:
-#  - gpu-smoke-test: one-shot nvidia-smi Job (GPU-schedulable proof)
-#  - vllm: Phi-3-mini-4k served via vLLM (OpenAI API), real inference workload
+#  - vllm: Phi-3-mini-4k served via vLLM (OpenAI API), real inference workload.
+#    Its readiness (apps Kustomization wait:true) is the GPU health gate.
+# NOTE: the one-shot gpu-smoke-test Job was removed — this node has a single GPU
+# (sharing-strategy=none), and a permanent GPU-holding Deployment (vLLM) starves a
+# GPU-requesting Job (DeadlineExceeded). vLLM serving inference is the better proof.
+# To run both you'd enable GPU time-slicing in the operator (advertise >1 replica).
 resources:
   - namespace.yaml
-  - gpu-smoke-test.yaml
   - vllm
