@@ -1,0 +1,21 @@
+# Cluster-level entrypoint for aws-gpu's apps layer.
+# dependsOn infrastructure (the GPU Operator's device-plugin must advertise
+# nvidia.com/gpu before any GPU pod can schedule) + wait: true, so this
+# Kustomization only goes READY once the GPU smoke-test Job succeeds.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./apps/aws-gpu
+  prune: true
+  wait: true
+  dependsOn:
+    - name: infrastructure
