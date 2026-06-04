@@ -11,6 +11,10 @@ spec:
   interval: 10m
   retryInterval: 1m
   timeout: 5m
+  # Platform layer → impersonate the cluster-admin kustomize-controller SA, so
+  # the --default-service-account=default lockdown (see flux-system/kustomization.yaml)
+  # doesn't strand it on the powerless `default` SA.
+  serviceAccountName: kustomize-controller
   # Source to pull from — the same GitRepository the bootstrap created.
   sourceRef:
     kind: GitRepository

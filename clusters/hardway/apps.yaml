@@ -8,6 +8,10 @@ spec:
   path: ./apps/hardway
   prune: true
   wait: true
+  # Platform layer → cluster-admin kustomize-controller SA (survives the
+  # --default-service-account=default lockdown). Apply still runs with full
+  # rights, so the SOPS-decrypted Secret lands in gpu-apps as before.
+  serviceAccountName: kustomize-controller
   dependsOn:
     - name: infrastructure
   sourceRef:

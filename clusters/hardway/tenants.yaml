@@ -16,6 +16,12 @@ spec:
   interval: 10m
   retryInterval: 1m
   timeout: 5m
+  # Platform layer (creates Namespaces + RBAC) → cluster-admin kustomize-controller
+  # SA, so it survives --default-service-account=default. NOTE: this is the
+  # guardrail-DEFINING Kustomization and is intentionally privileged; the
+  # guardrail-CONSUMING tenant Kustomizations (phase 1c) impersonate team-a/team-b
+  # instead and are confined by the RBAC this one installs.
+  serviceAccountName: kustomize-controller
   sourceRef:
     kind: GitRepository
     name: flux-system

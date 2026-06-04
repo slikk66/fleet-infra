@@ -3,3 +3,53 @@ kind: Kustomization
 resources:
 - gotk-components.yaml
 - gotk-sync.yaml
+# ── Multi-tenancy lockdown (fluxcd/flux2-multi-tenancy pattern) ───────────────
+# These JSON6902 patches retrofit the flux-generated (DO NOT EDIT) gotk files,
+# so the lockdown itself ships via GitOps. Three controller flags + one SA pin:
+patches:
+  # 1. --no-cross-namespace-refs: a Kustomization/HelmRelease/Alert in ns X may
+  #    only reference sources/objects in ns X. Stops a tenant from pointing at
+  #    another tenant's GitRepository/Secret. Applies to every controller that
+  #    resolves cross-ns refs (image-* aren't installed here; regex no-ops them).
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --no-cross-namespace-refs=true
+    target:
+      kind: Deployment
+      name: "(kustomize-controller|helm-controller|notification-controller|image-reflector-controller|image-automation-controller)"
+  # 2. --no-remote-bases: kustomize-controller refuses bases fetched from remote
+  #    URLs in a kustomization.yaml — a tenant can only build from THIS repo's
+  #    content, not pull in arbitrary remote (untrusted) kustomize bases.
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --no-remote-bases=true
+    target:
+      kind: Deployment
+      name: "kustomize-controller"
+  # 3. --default-service-account=default: the keystone. Any Kustomization/
+  #    HelmRelease WITHOUT spec.serviceAccountName now applies AS the powerless
+  #    `default` SA in its own namespace — i.e. fails closed. Forces every
+  #    workload Kustomization to explicitly opt into an identity (impersonation).
+  - patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --default-service-account=default
+    target:
+      kind: Deployment
+      name: "(kustomize-controller|helm-controller)"
+  # 4. Exempt the PLATFORM root: the bootstrap `flux-system` Kustomization lives
+  #    in gotk-sync.yaml with no serviceAccountName, so flag #3 would strand it
+  #    on the powerless default SA and freeze all reconciliation. Pin it to the
+  #    kustomize-controller SA (already cluster-admin via cluster-reconciler-*),
+  #    so the platform layer keeps cluster-wide power while tenants don't.
+  #    (infrastructure/apps/tenants Kustomizations set this inline in their own
+  #    files — same reason.)
+  - patch: |
+      - op: add
+        path: /spec/serviceAccountName
+        value: kustomize-controller
+    target:
+      kind: Kustomization
+      name: "flux-system"
