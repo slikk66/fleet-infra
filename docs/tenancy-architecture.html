@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hardway — multi-tenancy architecture</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px;
+         margin: 2rem auto; padding: 0 1.25rem; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #888; padding-bottom: .3rem; }
+  h2 { margin-top: 2.5rem; }
+  .diagram { margin: 1.5rem 0; padding: 1rem; border: 1px solid #8884; border-radius: 8px;
+             overflow-x: auto; background: #ffffff; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #8886; padding: .4rem .7rem; text-align: left; }
+  th { background: #8881; }
+  code { background: #8882; padding: .1rem .3rem; border-radius: 4px; }
+  .note { color: #888; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Multi-tenancy architecture (hardway)</h1>
+<p>Source of truth is <code>docs/tenancy-architecture.md</code>; this file is just a
+browser-renderable copy of the diagrams. Blue = platform (trusted, cluster-admin),
+green = tenant (confined), red = secret/denial.</p>
+
+<h2>1. The two-layer GitOps control plane</h2>
+<div class="diagram" id="d1"></div>
+<p class="note">team-b is an exact mirror — same shape, “team-b” everywhere.</p>
+
+<h2>2. The impersonation decision — who applies as whom</h2>
+<div class="diagram" id="d2"></div>
+
+<h2>3. Request-level flow + where the boundary bites</h2>
+<div class="diagram" id="d3"></div>
+
+<h2>4. Three independent enforcement layers</h2>
+<table>
+  <tr><th>Layer</th><th>Mechanism</th><th>Stops</th></tr>
+  <tr><td>Identity</td><td><code>--default-service-account</code> + per-Kustomization <code>serviceAccountName</code></td><td>Flux applying as cluster-admin on a tenant's behalf</td></tr>
+  <tr><td>RBAC scope</td><td>RoleBinding (ns) vs ClusterRoleBinding (cluster)</td><td>the impersonated SA acting outside its namespace</td></tr>
+  <tr><td>Reference scope</td><td><code>--no-cross-namespace-refs</code> / <code>--no-remote-bases</code></td><td>a tenant pointing at another ns's secrets/sources, or remote bases</td></tr>
+</table>
+
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({ startOnLoad: false, theme: 'default' });
+
+const diagrams = {
+d1: `flowchart TB
+  classDef plat fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
+  classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
+  classDef secret fill:#fee2e2,stroke:#991b1b,color:#7f1d1d;
+
+  subgraph GH["GitHub"]
+    FI["fleet-infra<br/>PLATFORM repo (guardrails)"]:::plat
+    TARA["tenant-team-a<br/>private · deploy/"]:::tenant
+    TBRB["tenant-team-b<br/>private · deploy/"]:::tenant
+  end
+
+  subgraph FS["ns: flux-system — controllers run here (cluster-admin)"]
+    ROOT["Kustomization: flux-system (root)<br/>path ./clusters/hardway"]:::plat
+    INFRA["Kustomization: infrastructure"]:::plat
+    APPS["Kustomization: apps (SOPS)"]:::plat
+    TEN["Kustomization: tenants (SOPS)"]:::plat
+  end
+
+  subgraph NSA["ns: team-a"]
+    SAA["SA team-a + RoleBinding→admin<br/>(namespace-scoped)"]:::plat
+    SECA["Secret deploy-key<br/>SOPS-decrypted by platform"]:::secret
+    GRA["GitRepository team-a"]:::tenant
+    KA["Kustomization: team-a<br/>SA=team-a · targetNamespace=team-a"]:::tenant
+    WLA["Deployment team-a-whoami<br/>+ ConfigMap team-a-config"]:::tenant
+  end
+
+  FI ==>|writeable bootstrap key| ROOT
+  ROOT --> INFRA & APPS & TEN
+  TEN ==>|"creates guardrails (as cluster-admin)"| SAA & SECA & GRA & KA
+  SECA -.->|SSH auth| GRA
+  TARA ==>|"read-only deploy key (SSH)"| GRA
+  GRA -->|artifact| KA
+  KA ==>|"applies AS team-a SA"| WLA`,
+
+d2: `flowchart TB
+  classDef plat fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
+  classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
+  classDef deny fill:#fee2e2,stroke:#991b1b,color:#7f1d1d;
+
+  Q{"Kustomization sets<br/>spec.serviceAccountName?"}
+  Q -->|"no"| DEF["impersonate &lt;ns&gt;:default<br/>(--default-service-account=default)<br/>powerless → FAILS CLOSED"]:::deny
+  Q -->|"yes = kustomize-controller<br/>(infrastructure / apps / tenants)"| PLAT["cluster-admin<br/>platform layer"]:::plat
+  Q -->|"yes = team-a<br/>(tenant Kustomization)"| TEN["team-a SA<br/>admin in team-a ONLY<br/>(via RoleBinding, not ClusterRoleBinding)"]:::tenant
+
+  TEN --> OKa["create Deploy/CM/Secret<br/>inside team-a"]:::tenant
+  TEN --> NOa["other namespace<br/>or cluster-scoped object<br/>DENIED by apiserver"]:::deny`,
+
+d3: `sequenceDiagram
+  participant Repo as tenant-team-a repo
+  participant SC as source-controller
+  participant KC as kustomize-controller
+  participant API as kube-apiserver
+
+  Repo->>SC: clone deploy/ (read-only deploy key)
+  SC->>KC: built artifact
+  Note over KC: impersonate<br/>system:serviceaccount:team-a:team-a
+  KC->>API: apply Deployment (→ team-a)
+  API-->>KC: allowed (RoleBinding: admin in team-a)
+  Note over Repo,API: escape attempt (boundary demo)
+  KC->>API: apply ClusterRole (cluster-scoped)
+  API-->>KC: FORBIDDEN — team-a SA cannot create clusterroles
+  Note over KC: team-a Kustomization → NotReady<br/>boundary proven, team-b unaffected`
+};
+
+for (const [id, def] of Object.entries(diagrams)) {
+  try {
+    const { svg } = await mermaid.render(id + '-svg', def);
+    document.getElementById(id).innerHTML = svg;
+  } catch (e) {
+    document.getElementById(id).innerHTML = '<pre style="color:#b91c1c">' + e + '</pre>';
+  }
+}
+</script>
+</body>
+</html>
