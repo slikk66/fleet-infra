@@ -43,9 +43,12 @@ Phases:
 **DECIDED session 8 (defaults confirmed by user):** tenant names `team-a` / `team-b`; fleet-infra guardrail layout `tenants/hardway/<tenant>/`; order = **in-repo guardrails first**, create the GitHub tenant repos as needed.
 
 ### Tenancy build status (session 8 — UPDATE AS YOU GO)
-- [ ] Phase-1a **Per-tenant guardrails** (ns + SA + ns-scoped admin RoleBinding) — `tenants/hardway/{team-a,team-b}/`, wired via `clusters/hardway/tenants.yaml` Flux Kustomization.
-- [ ] Phase-1b **Controller lockdown** (`clusters/hardway/flux-system/kustomization.yaml` patches) + companion RBAC so platform Kustomizations survive `--default-service-account=default`.
-- [ ] Phase-1c **Tenant workload repos** (`slikk66/tenant-team-a` / `-team-b`) + per-tenant `GitRepository`+`Kustomization` with impersonation.
+- [x] Phase-1a **Per-tenant guardrails** — `tenants/hardway/{team-a,team-b}/` (ns + SA + ns-scoped admin RoleBinding), wired via `clusters/hardway/tenants.yaml`. Applied + verified (commit `23dd8c4`). `kubectl auth can-i --as` confirms team-a SA = admin in team-a, denied elsewhere/cluster-scoped.
+- [x] Phase-1b **Controller lockdown** (commit `953b111`) — patches in `clusters/hardway/flux-system/kustomization.yaml`: `--no-cross-namespace-refs` (kustomize/helm/notification), `--no-remote-bases` (kustomize), `--default-service-account=default` (kustomize/helm), + pin root `flux-system` Kustomization to `serviceAccountName: kustomize-controller`. Platform Kustomizations infrastructure/apps/tenants pinned inline to same SA. **The lockdown surfaced 2 real issues, both fixed:**
+  - **Cross-ns source refs** (commit `acc4c57`): HelmReleases in `gpu-operator` referenced sources in `flux-system`. Fix = co-locate each source in its operator base, in `gpu-operator` ns; deleted shared `infrastructure/sources/base` catalog + its overlay refs.
+  - **Unprivileged Helm impersonation** (commits `045ee06`+`cdd7a01`): `--default-service-account` governs helm-controller too → HR without `serviceAccountName` runs as powerless `gpu-operator:default`. Fix = `ServiceAccount gpu-operator/helm-installer` + ClusterRoleBinding→cluster-admin (trusted PLATFORM installer) in each operator base; HR `spec.serviceAccountName: helm-installer`. (Gotcha hit: forgot to add rbac.yaml to fake base's kustomization.yaml first → HR impersonated a non-existent SA = same zero perms.)
+  - End state: all 4 Kustomizations + HR READY @ `cdd7a01`, cluster fully healthy.
+- [ ] Phase-1c **Tenant workload repos** (`slikk66/tenant-team-a` / `-team-b`) + per-tenant `GitRepository`+`Kustomization` with impersonation (`spec.serviceAccountName: team-a`, `targetNamespace: team-a`).
 - [ ] Phase-1d **Boundary-denial demo** (cross-ns/cluster-scoped manifest → DENIED under impersonation).
 - [ ] Phases 2-5 (quota, time-slicing, priority/preemption, netpol) — not started.
 
