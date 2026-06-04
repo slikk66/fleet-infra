@@ -1,0 +1,19 @@
+# Data-plane guardrail (platform-owned): isolate team-a from other tenants.
+# Standard networking.k8s.io NetworkPolicy — enforced by Cilium (hardway's CNI).
+# A single policy that is BOTH a default-deny (it selects every pod and supplies
+# an explicit ingress allow-list, so anything unmatched is dropped) AND a
+# same-namespace allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: isolate-tenant
+  namespace: team-a
+spec:
+  podSelector: {}            # applies to EVERY pod in team-a
+  policyTypes:
+    - Ingress               # constrain INBOUND only; egress + DNS stay open
+  ingress:
+    - from:
+        - podSelector: {}    # allow only from pods in THIS namespace (team-a)
+  # Effect: team-a pods reach each other; team-b (or any other ns / external) → DROPPED.
+  # Production would additionally allow ingress controllers / monitoring namespaces.
