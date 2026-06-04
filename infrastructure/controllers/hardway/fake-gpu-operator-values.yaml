@@ -11,7 +11,22 @@ data:
   values.yaml: |
     topology:
       nodePools:
+        # Whole-GPU pool (worker-1): 2x H100 advertised as nvidia.com/gpu.
         default:
           gpuProduct: NVIDIA-H100-80GB-HBM3
           gpuCount: 2
           gpuMemory: 81559
+        # MIG pool (worker-2, opted in via run.ai/simulated-gpu-node-pool=mig):
+        # device 1 stays a whole GPU (gpuCount: 1); device 0 is partitioned into
+        # a mixed MIG geometry advertised as schedulable extended resources via
+        # otherDevices. The fake device-plugin registers each otherDevices.name
+        # verbatim, so pods request e.g. `nvidia.com/mig-3g.40gb: 1`.
+        mig:
+          gpuProduct: NVIDIA-H100-80GB-HBM3
+          gpuCount: 1
+          gpuMemory: 81559
+          otherDevices:
+            - name: nvidia.com/mig-3g.40gb
+              count: 1
+            - name: nvidia.com/mig-1g.10gb
+              count: 2
