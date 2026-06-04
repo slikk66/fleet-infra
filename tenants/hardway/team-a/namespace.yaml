@@ -1,0 +1,9 @@
+# Tenant namespace — the blast-radius boundary for team-a.
+# The platform team (this repo) owns the namespace; the tenant only ever
+# operates *inside* it via the impersonated ServiceAccount (see rbac.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    toolkit.fluxcd.io/tenant: team-a

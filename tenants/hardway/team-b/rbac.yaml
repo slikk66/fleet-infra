@@ -1,0 +1,27 @@
+# The identity Flux impersonates when reconciling team-b's workloads.
+# A Kustomization with spec.serviceAccountName: team-b (wired in phase 1c)
+# applies manifests AS this SA, so the apiserver enforces exactly the RBAC
+# below — not the kustomize-controller's cluster-admin.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: team-b
+  namespace: team-b
+---
+# RoleBinding (namespace-scoped), NOT ClusterRoleBinding — this is the whole
+# isolation trick. It references the built-in `admin` ClusterRole but, because
+# it's a RoleBinding in namespace team-b, those admin powers apply ONLY here.
+# The tenant SA can do almost anything inside team-b and NOTHING outside it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: team-b-admin
+  namespace: team-b
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - kind: ServiceAccount
+    name: team-b
+    namespace: team-b

@@ -5,6 +5,54 @@
 
 ---
 
+## ▶ NEXT SESSION COLD-START — START HERE (updated session 8, 2026-06-04)
+
+**Active work:** Flux **multi-tenancy** build on **hardway** (free). IN PROGRESS as of session 8 — see "Tenancy build status" below.
+
+**✅ TCC IS FIXED (session 8): the macOS UPDATE cleared the Local Network gate. The direct path works first-try — the SSH tunnel is RETIRED. Just connect directly:**
+```bash
+export KUBECONFIG=/Users/dbilleci/Development/slikk66/flux-gpu-trainer/k8s-hardway/admin.kubeconfig
+kubectl get nodes        # both Ready — confirmed session 8 (Go bins reach VM IPs again, no tunnel)
+flux get kustomizations  # expect all READY
+```
+If OrbStack was just (re)started, wait ~30-60s for the host↔VM L3 path to settle, then retry. The old loopback-SSH-tunnel workaround (`admin-tunnel.kubeconfig`) is no longer needed — kept only as a fallback note in §9 in case TCC ever regresses on a future macOS point release.
+
+**Post-restart cleanup that may be needed after any OrbStack/Mac restart** (stale pods from the kubelet/GPU-plugin outage, all benign — `UnexpectedAdmissionError` from the device-plugin not being Ready at admission time):
+```bash
+# force-delete any stuck Unknown/Terminating pods so controllers reschedule fresh
+kubectl get pods -A --no-headers | grep -E "Unknown|Terminating" | \
+  while read ns n _; do kubectl delete pod -n "$ns" "$n" --force --grace-period=0; done
+```
+Then wait ~60-90s: cilium `node.cilium.io/agent-not-ready:NoSchedule` taint auto-clears when each worker's cilium agent goes Ready, which unblocks `gpu-demo` (x4) scheduling. Healthy end state: 2 nodes Ready · all pods Running · flux all READY · GPUs 2+2 · gpu-demo x4 bin-packed 2/node · secret `gpu-apps/demo-credentials` present.
+
+**Plan (direction agreed session 6; confirm open Qs before building):** "go deep on Flux tenancy first, then the rest incrementally." Two tenants `team-a` / `team-b`. Use the **real platform-team pattern** (= what the Baseten cloud-platform role actually does): the platform repo (`fleet-infra`) holds the *guardrails*; each tenant gets their *own* repo for workloads. Baseten nuance: their paying customers don't self-serve GitOps — the control plane/MCM provisions per-tenant ns+quota+placement — but the guardrail layer we build (ns + SA + RBAC + quota + netpol + Flux impersonation) is identical and is the transferable core.
+
+Phases:
+1. **Flux tenant isolation (DEEP — do this first):**
+   - **Controller lockdown** — patch `clusters/hardway/flux-system/kustomization.yaml` to add to the kustomize-controller + helm-controller `args`: `--no-cross-namespace-refs=true`, `--no-remote-bases=true`, `--default-service-account=default`. (Verified session 6: NOT set today — controllers only have `--watch-all-namespaces=true`, and that kustomization.yaml has no `patches:`.)
+   - **Per-tenant guardrails** in fleet-infra (e.g. `tenants/hardway/team-a/`): `Namespace`, `ServiceAccount`, `RoleBinding` (admin scoped to that ns only), + the tenant's Flux `GitRepository` + `Kustomization` with `spec.serviceAccountName: <tenant-sa>` (impersonation) and `spec.targetNamespace`.
+   - **Tenant workload repo:** a separate GitHub repo per tenant (read-only deploy key for its `GitRepository`).
+   - **Teaching payoff:** a tenant manifest that tries to touch another ns / cluster-scoped object → Flux apply DENIED under impersonation. Demonstrate the boundary explicitly.
+2. **Resource quota:** `ResourceQuota` (cap `nvidia.com/gpu`, cpu, mem) + `LimitRange` per tenant ns.
+3. **GPU time-slicing:** fake-gpu-operator advertise N GPU replicas; co-schedule team-a + team-b GPU pods.
+4. **Scheduling fairness:** `PriorityClass` per tenant + force a preemption.
+5. **Network isolation:** default-deny `NetworkPolicy` per ns + `CiliumNetworkPolicy` cross-tenant deny (Cilium is hardway's CNI).
+
+**DECIDED session 7:** **separate real GitHub repos per tenant** (user OK'd the faithful pattern after the two-layer explanation: fleet-infra = guardrails layer; each tenant's own repo = workload layer, pulled via read-only deploy key). Plan: create `slikk66/tenant-team-a` + `slikk66/tenant-team-b` via `gh`, each with a `deploy/` dir of 2-3 tiny manifests (boundary lesson is identical at any repo size). Baseten caveat still holds: their customers don't self-serve git — MCM provisions tenants — but the guardrail layer is the transferable core; separate repos are the canonical way to *learn* the impersonation + deploy-key + boundary mechanics.
+
+**DECIDED session 8 (defaults confirmed by user):** tenant names `team-a` / `team-b`; fleet-infra guardrail layout `tenants/hardway/<tenant>/`; order = **in-repo guardrails first**, create the GitHub tenant repos as needed.
+
+### Tenancy build status (session 8 — UPDATE AS YOU GO)
+- [ ] Phase-1a **Per-tenant guardrails** (ns + SA + ns-scoped admin RoleBinding) — `tenants/hardway/{team-a,team-b}/`, wired via `clusters/hardway/tenants.yaml` Flux Kustomization.
+- [ ] Phase-1b **Controller lockdown** (`clusters/hardway/flux-system/kustomization.yaml` patches) + companion RBAC so platform Kustomizations survive `--default-service-account=default`.
+- [ ] Phase-1c **Tenant workload repos** (`slikk66/tenant-team-a` / `-team-b`) + per-tenant `GitRepository`+`Kustomization` with impersonation.
+- [ ] Phase-1d **Boundary-denial demo** (cross-ns/cluster-scoped manifest → DENIED under impersonation).
+- [ ] Phases 2-5 (quota, time-slicing, priority/preemption, netpol) — not started.
+
+**Cluster changes NOT in git — VM-local** (session 7): `failSwapOn: false` on both workers' kubelet-config (see §3, cluster-fix #4). Re-apply if VMs rebuilt.
+
+---
+
 ## 0. Current state (end of session 5, 2026-06-03)
 
 **Project:** user starts at **Baseten** (~2026-06-09) — AI inference, NVIDIA GPUs across 15+ clouds. Role: **cloud platform** (Flux + Terraform + the global multi-cluster manager / "MCM"). Hands-on prep to fluency in Flux/GitOps, GPU scheduling, multi-cloud IaC. Mode: **TEACHING** — explain the "why"; user reads everything, asks pointed follow-ups.
@@ -23,7 +71,7 @@
 - **Workbench (LOCAL ONLY, never pushed):** `/Users/dbilleci/Development/slikk66/flux-gpu-trainer/`
   - `k8s-hardway/` — hardway PKI + `admin.kubeconfig`; **`.sops/age.agekey`** (age private key, mode 600)
   - `iac/aws-gpu/{infra,flux-bootstrap}/` — Track B Terraform. **Edits this session live on disk here, uncommitted (workbench isn't git-tracked for push) — they ARE the current source of truth for the infra.**
-- **GitOps repo (pushed):** `/Users/dbilleci/Development/slikk66/fleet-infra/` → `git@github.com:slikk66/fleet-infra` (branch `main`). **HEAD = `256ea9a`, clean.**
+- **GitOps repo (pushed):** `/Users/dbilleci/Development/slikk66/fleet-infra/` → `git@github.com:slikk66/fleet-infra` (branch `main`). **HEAD = `ef8b8a0`** (handoff edit pending commit otherwise clean).
 
 ### KUBECONFIGs
 - **hardway:** `/Users/dbilleci/Development/slikk66/flux-gpu-trainer/k8s-hardway/admin.kubeconfig`
@@ -48,7 +96,7 @@ A `rtk` shell hook mangles stdout for `git`, `helm`, `aws`, `kubectl`, `grep`, `
 ## 3. Track A: hardway
 
 - "k8s the hard way" on OrbStack Ubuntu arm64 VMs. k8s v1.35.3, Cilium CNI. control-1 `192.168.139.92` (apiserver, not a node) · worker-1 `192.168.139.161` · worker-2 `192.168.139.68`. Service CIDR `10.32.0.0/24` (DNS `.10`), Pod CIDR `10.200.0.0/16`.
-- **3 cluster-fixes NOT in git** (re-apply if cluster rebuilt): (1) ClusterRole `system:kube-apiserver-to-kubelet` + binding; (2) apiserver `--advertise-address=192.168.139.92` (edit `/etc/systemd/system/kube-apiserver.service` on control-1, `.bak` exists); (3) CoreDNS bootstrap seed (now in git, Flux adopted).
+- **4 cluster-fixes NOT in git** (re-apply if cluster rebuilt): (1) ClusterRole `system:kube-apiserver-to-kubelet` + binding; (2) apiserver `--advertise-address=192.168.139.92` (edit `/etc/systemd/system/kube-apiserver.service` on control-1, `.bak` exists); (3) CoreDNS bootstrap seed (now in git, Flux adopted); (4) **`failSwapOn: false`** appended to `/var/lib/kubelet/kubelet-config.yaml` on **both workers** (session 7). OrbStack re-enables swap (`zram0`+`vdc`) on every VM restart; without this, kubelet exits `1/FAILURE` ("running with swap on is not supported") and the node never goes Ready. Per-worker file (different cert paths) — edit each, then `sudo systemctl restart kubelet`.
 - **SOPS+age (live):** `apps/hardway/demo.secret.yaml` is SOPS-encrypted; hardway `apps` Kustomization has `decryption: {provider: sops, secretRef: sops-age}`; Flux decrypts → `Secret gpu-apps/demo-credentials` (cleartext) in-cluster. To edit: `sops apps/hardway/demo.secret.yaml`. To view: `SOPS_AGE_KEY_FILE=…/.sops/age.agekey sops -d apps/hardway/demo.secret.yaml`.
 
 Healthy check: `flux get kustomizations` (all READY) · `flux get helmreleases -A`.
@@ -134,6 +182,8 @@ Prep exercises, best on **hardway** (free). Prioritized for the cloud-platform r
 ---
 
 ## 9. Gotchas / risks
+- **macOS Local Network TCC gate (sessions 6-7) — ✅ FIXED session 8 by the macOS update.** History: on macOS **26.5**, Go CLIs (`kubectl`, `flux` at `/opt/homebrew/bin`) got `connect: no route to host` to OrbStack VM IPs (`192.168.139.92:6443`) while Apple `/usr/bin` binaries (`curl`/`nc`/`ping`) worked (exempt); the documented per-app toggle fix never cleared it. The macOS point-update applied before session 8 resolved it — Go bins now reach VM IPs directly, tunnel retired. **Fallback if it ever regresses:** loopback SSH tunnel `ssh -f -N -L 127.0.0.1:6443:localhost:6443 control-1@orb` (Apple ssh + OrbStack = TCC-exempt) + a kubeconfig with `server: https://127.0.0.1:6443` (in cert SAN); `admin-tunnel.kubeconfig` still on disk. **Diagnose test:** `/usr/bin/curl -sk https://192.168.139.92:6443/healthz` → `ok` while `kubectl` says `no route to host` = TCC gate, not the cluster. Note: right after an OrbStack restart the host↔VM L3 path takes ~30–60s to settle — wait and retry.
+- **OrbStack VM restart re-enables swap → kubelet crash-loop (NEW session 7):** any stop/start of the OrbStack VMs (or a Mac restart) brings swap back (`/dev/zram0`+`/dev/vdc`, not in fstab — OrbStack/guest-agent enables it). Default kubelet refuses swap → both workers crash-loop `1/FAILURE`, NotReady, and CoreDNS/cilium-operator wedge Pending. Permanently mitigated by cluster-fix #4 (`failSwapOn: false`, §3) — kubelet now starts regardless. If a future rebuild loses that, the symptom in `journalctl -u kubelet` is "running with swap on is not supported".
 - **Cost:** aws-gpu ~$1.21/hr on-demand. `destroy` BOTH stacks (flux-bootstrap first) when done. Currently $0.
 - **user_data stop/start trap (§4):** never assume a `user_data` edit rebuilt the box — confirm a NEW `instance_id` after apply, else it just stop/started (cloud-init didn't run, instance store wiped, IP changed but cert SAN stale).
 - **Instance store is ephemeral:** wiped on stop/terminate; a reboot drops the bind-mounts → k3s would re-pull images. We create/destroy (never stop/start), so fine. DKMS driver rebuild ~3-4 min at first boot.

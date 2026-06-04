@@ -1,0 +1,24 @@
+# Flux Kustomization — the cluster entrypoint for the PLATFORM-OWNED tenant
+# guardrails (namespaces, ServiceAccounts, RBAC). Sibling to infrastructure.yaml
+# and apps.yaml; picked up automatically because Flux scans ./clusters/hardway.
+#
+# This one runs with the kustomize-controller's own privileges (no
+# spec.serviceAccountName) BECAUSE it is the trusted platform layer creating
+# cluster-scoped objects (Namespaces) + RBAC. The TENANT Kustomizations added
+# later (phase 1c) are the opposite: they DO set serviceAccountName so the
+# untrusted workload repos are confined by the RBAC defined here.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: tenants
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./tenants/hardway
+  prune: true
+  wait: true
