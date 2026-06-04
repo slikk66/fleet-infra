@@ -1,0 +1,23 @@
+# Installer identity for the real NVIDIA GPU Operator HelmRelease.
+# Same rationale as the fake sibling: under --default-service-account=default,
+# helm-controller needs an explicit SA to reconcile the HelmRelease. The real
+# operator installs driver/toolkit/device-plugin DaemonSets, a ClusterPolicy CR,
+# NFD/GFD, and cluster-scoped RBAC — a trusted PLATFORM install → cluster-admin.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-installer
+  namespace: gpu-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nvidia-gpu-operator-installer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: helm-installer
+    namespace: gpu-operator

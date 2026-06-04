@@ -11,6 +11,9 @@ spec:
   interval: 15m
   # helm op timeout — gpu-operator pulls several large images on first install.
   timeout: 10m
+  # helm-controller impersonates this cluster-admin SA (rbac.yaml) — required
+  # under --default-service-account=default. Platform install → privileged.
+  serviceAccountName: helm-installer
   chart:
     spec:
       chart: gpu-operator

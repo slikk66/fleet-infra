@@ -5,6 +5,10 @@ metadata:
   namespace: gpu-operator
 spec:
   interval: 15m
+  # helm-controller impersonates this SA (cluster-admin via rbac.yaml) when
+  # reconciling. Required under --default-service-account=default, else it falls
+  # back to the powerless gpu-operator:default SA. Platform component → privileged.
+  serviceAccountName: helm-installer
   chartRef:
     kind: OCIRepository
     name: fake-gpu-operator

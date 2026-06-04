@@ -1,0 +1,25 @@
+# Installer identity for the fake-gpu-operator HelmRelease.
+# Under the lockdown's --default-service-account=default, helm-controller
+# impersonates a SA when reconciling a HelmRelease. Absent one it falls back to
+# the powerless `gpu-operator:default` SA, which can't even read Helm's release
+# Secrets. This is a PLATFORM component (it patches node GPU capacity = cluster
+# scoped), so it gets a cluster-admin installer SA. Contrast tenants (phase 1c):
+# they reconcile as a namespace-scoped SA and stay boxed in.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: helm-installer
+  namespace: gpu-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fake-gpu-operator-installer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: helm-installer
+    namespace: gpu-operator
