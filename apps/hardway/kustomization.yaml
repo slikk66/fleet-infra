@@ -8,4 +8,5 @@ resources:
   - demo.secret.yaml          # SOPS-encrypted; decrypted by Flux at apply time
 replicas:
   - name: gpu-demo
-    count: 4
+    count: 2          # temporarily 2 during the MIG demo (worker-2 GPUs → MIG slices);
+                      # restore to 4 once MIG exercise is done.
