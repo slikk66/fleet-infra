@@ -2,8 +2,9 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Per-cluster overlay for the "hardway" cluster's infrastructure controllers.
 # Add cluster-specific controllers / patches here; shared definitions live in ../base.
+# (Sources are no longer a shared flux-system catalog — each operator base now
+# carries its own source in its own namespace, per --no-cross-namespace-refs.)
 resources:
-  - ../../sources/base
   - ../base/coredns
   - ../base/fake-gpu-operator
   - gpu-nodes.yaml

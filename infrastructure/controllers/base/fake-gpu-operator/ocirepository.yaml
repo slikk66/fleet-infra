@@ -1,0 +1,15 @@
+# Chart source for the fake-gpu-operator HelmRelease. Co-located in the SAME
+# namespace (gpu-operator) as the HelmRelease that consumes it — required under
+# the multi-tenancy lockdown's --no-cross-namespace-refs (a HelmRelease may only
+# reference a source in its own namespace). Previously lived in flux-system as a
+# shared "sources catalog"; that pattern is incompatible with the lockdown.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: fake-gpu-operator
+  namespace: gpu-operator
+spec:
+  interval: 30m
+  url: oci://ghcr.io/run-ai/fake-gpu-operator/fake-gpu-operator
+  ref:
+    tag: "0.0.81"

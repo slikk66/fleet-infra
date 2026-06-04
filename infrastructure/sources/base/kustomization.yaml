@@ -1,7 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-# Shared catalog of external sources (OCIRepositories, HelmRepositories, GitRepositories).
-# Per-cluster overlays reference this base so every cluster pulls the same artifacts.
-resources:
-  - runai-oci.yaml
-  - nvidia-helm.yaml

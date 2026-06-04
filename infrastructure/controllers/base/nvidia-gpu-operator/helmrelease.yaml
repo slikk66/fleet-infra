@@ -20,7 +20,8 @@ spec:
       sourceRef:
         kind: HelmRepository
         name: nvidia
-        namespace: flux-system
+        # no namespace → defaults to this HelmRelease's namespace (gpu-operator),
+        # the only ref allowed under --no-cross-namespace-refs.
       # how often source-controller re-checks the repo index for this chart.
       interval: 1h
   install:

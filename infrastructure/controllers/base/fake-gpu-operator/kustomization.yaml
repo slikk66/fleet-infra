@@ -6,4 +6,5 @@ kind: Kustomization
 # base directory nvidia-gpu-operator/ for clusters with real hardware.)
 resources:
   - namespace.yaml
+  - ocirepository.yaml   # chart source, co-located in gpu-operator ns (lockdown)
   - helmrelease.yaml

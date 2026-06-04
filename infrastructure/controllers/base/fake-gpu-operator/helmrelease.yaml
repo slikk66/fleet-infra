@@ -8,7 +8,8 @@ spec:
   chartRef:
     kind: OCIRepository
     name: fake-gpu-operator
-    namespace: flux-system
+    # no namespace → defaults to this HelmRelease's namespace (gpu-operator),
+    # the only ref allowed under --no-cross-namespace-refs.
   install:
     remediation:
       retries: 3

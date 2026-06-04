@@ -5,4 +5,5 @@ kind: Kustomization
 # HR references via valuesFrom (e.g. distro-specific containerd paths).
 resources:
   - namespace.yaml
+  - helmrepository.yaml   # chart source, co-located in gpu-operator ns (lockdown)
   - helmrelease.yaml

@@ -5,6 +5,5 @@ kind: Kustomization
 # No gpu-nodes.yaml here: NFD/GFD discover the real GPU and label the node,
 # so we don't hand-author node labels like hardway does.
 resources:
-  - ../../sources/base
-  - ../base/nvidia-gpu-operator
+  - ../base/nvidia-gpu-operator   # carries its own nvidia HelmRepository now
   - nvidia-gpu-operator-values.yaml
