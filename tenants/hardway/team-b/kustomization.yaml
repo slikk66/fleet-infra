@@ -6,3 +6,5 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - rbac.yaml
+  - deploy-key.secret.yaml   # SOPS-encrypted read-only deploy key (decrypted by Flux)
+  - sync.yaml                # GitRepository + impersonated Kustomization → tenant repo

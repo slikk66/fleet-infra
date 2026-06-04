@@ -26,5 +26,12 @@ spec:
     kind: GitRepository
     name: flux-system
   path: ./tenants/hardway
+  # Decrypt the per-tenant deploy-key Secrets (tenants/hardway/*/deploy-key.secret.yaml)
+  # before applying — same SOPS+age setup the apps Kustomization uses. The platform
+  # provisions the cleartext Secret into the tenant ns; the tenant never sees the key.
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
   prune: true
   wait: true

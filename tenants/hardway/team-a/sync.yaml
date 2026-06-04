@@ -1,0 +1,35 @@
+# The tenant's source + reconciler. Both objects live in the team-a namespace
+# (not flux-system), so every reference stays in-namespace per --no-cross-namespace-refs.
+# The PLATFORM tenants Kustomization creates these; the team-a Kustomization then
+# reconciles the tenant's OWN repo independently, but confined by impersonation.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: team-a
+  namespace: team-a
+spec:
+  interval: 1m
+  url: ssh://git@github.com/slikk66/tenant-team-a
+  ref:
+    branch: main
+  secretRef:
+    name: deploy-key        # read-only deploy key, same ns (SOPS-provisioned)
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: team-a
+  namespace: team-a
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: team-a
+  path: ./deploy
+  prune: true
+  wait: true
+  # ── the two lines that make this a TENANT, not a platform Kustomization ──
+  serviceAccountName: team-a   # apply AS the team-a SA (admin in team-a only)
+  targetNamespace: team-a      # force every namespaced resource into team-a
