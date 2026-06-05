@@ -1,0 +1,44 @@
+# Resource isolation for team-a — the THIRD boundary (after RBAC + NetworkPolicy):
+# caps how much compute/GPU the tenant can consume so it can't starve neighbours.
+# Platform-owned (a tenant can't raise its own ceiling). team-a is the "larger"
+# tenant here (contrast team-b).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-a-quota
+  namespace: team-a
+spec:
+  hard:
+    requests.cpu: "2"          # sum of all pods' cpu requests
+    requests.memory: 2Gi
+    limits.cpu: "4"            # sum of all pods' cpu limits
+    limits.memory: 4Gi
+    pods: "15"
+    # GPU caps. Extended resources use the `requests.` prefix and k8s forces
+    # request==limit, so this caps both. Whole GPUs + the MIG slice team-a uses.
+    requests.nvidia.com/gpu: "1"
+    requests.nvidia.com/mig-3g.40gb: "1"
+---
+# LimitRange — the companion that makes the quota usable. A quota on requests.cpu
+# REJECTS any pod that omits a cpu request; this supplies defaults so tenants
+# don't have to annotate every container, and bounds per-container min/max.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team-a-limits
+  namespace: team-a
+spec:
+  limits:
+    - type: Container
+      default:                 # applied as LIMITS when a container omits them
+        cpu: 250m
+        memory: 256Mi
+      defaultRequest:          # applied as REQUESTS when a container omits them
+        cpu: 100m
+        memory: 128Mi
+      max:                     # a single container may not exceed
+        cpu: "2"
+        memory: 2Gi
+      min:                     # ...nor request less than
+        cpu: 10m
+        memory: 16Mi
