@@ -9,10 +9,10 @@
   body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px;
          margin: 2rem auto; padding: 0 1.25rem; line-height: 1.5; }
   h1 { border-bottom: 2px solid #888; padding-bottom: .3rem; }
-  h2 { margin-top: 2.5rem; }
+  h2 { margin-top: 2.5rem; border-top: 1px solid #8883; padding-top: 1.2rem; }
   .diagram { margin: 1.5rem 0; padding: 1rem; border: 1px solid #8884; border-radius: 8px;
              overflow-x: auto; background: #ffffff; }
-  table { border-collapse: collapse; margin: 1rem 0; }
+  table { border-collapse: collapse; margin: 1rem 0; width: 100%; }
   th, td { border: 1px solid #8886; padding: .4rem .7rem; text-align: left; }
   th { background: #8881; }
   code { background: #8882; padding: .1rem .3rem; border-radius: 4px; }
@@ -21,63 +21,102 @@
 </head>
 <body>
 <h1>Multi-tenancy architecture (hardway)</h1>
-<p>Source of truth is <code>docs/tenancy-architecture.md</code>; this file is just a
-browser-renderable copy of the diagrams. Blue = platform (trusted, cluster-admin),
+<p>Two layers (platform vs tenant) and <strong>three independent isolation
+boundaries</strong> around every tenant, plus GPU partitioning. Source of truth is
+<code>docs/tenancy-architecture.md</code>. Blue = platform (cluster-admin),
 green = tenant (confined), red = secret/denial.</p>
+
+<h2>0. The big picture — three boundaries</h2>
+<p>A tenant is boxed in on three independent axes — separate mechanisms, enforced
+by different parts of the system. Don't conflate them.</p>
+<div class="diagram" id="d0"></div>
+<table>
+  <tr><th>Boundary</th><th>Mechanism</th><th>Enforced by</th><th>When</th><th>A tenant can't…</th></tr>
+  <tr><td>① Control plane</td><td>RBAC + impersonation</td><td>kube-apiserver</td><td>apply time</td><td>deploy outside its namespace</td></tr>
+  <tr><td>② Data plane</td><td>NetworkPolicy</td><td>the CNI (Cilium)</td><td>runtime</td><td>talk to another tenant's pods</td></tr>
+  <tr><td>③ Consumption</td><td>ResourceQuota + LimitRange</td><td>kube-apiserver admission</td><td>create time</td><td>starve neighbours / hog GPUs</td></tr>
+</table>
 
 <h2>1. The two-layer GitOps control plane</h2>
 <div class="diagram" id="d1"></div>
-<p class="note">team-b is an exact mirror — same shape, “team-b” everywhere.</p>
+<p class="note">The platform <code>tenants</code> Kustomization installs every guardrail plus the
+tenant's own GitRepository + Kustomization. team-b is an exact mirror.</p>
 
-<h2>2. The impersonation decision — who applies as whom</h2>
+<h2>2. Boundary ① — Control plane (RBAC + impersonation)</h2>
+<p>Flux's kustomize-controller is itself cluster-admin; impersonation makes it
+apply a tenant's manifests <em>as</em> the tenant SA, so the apiserver enforces the
+tenant's RBAC.</p>
 <div class="diagram" id="d2"></div>
-
-<h2>3. Request-level flow + where the boundary bites</h2>
 <div class="diagram" id="d3"></div>
-
-<h2>4. Three independent enforcement layers</h2>
 <table>
-  <tr><th>Layer</th><th>Mechanism</th><th>Stops</th></tr>
-  <tr><td>Identity</td><td><code>--default-service-account</code> + per-Kustomization <code>serviceAccountName</code></td><td>Flux applying as cluster-admin on a tenant's behalf</td></tr>
-  <tr><td>RBAC scope</td><td>RoleBinding (ns) vs ClusterRoleBinding (cluster)</td><td>the impersonated SA acting outside its namespace</td></tr>
-  <tr><td>Reference scope</td><td><code>--no-cross-namespace-refs</code> / <code>--no-remote-bases</code></td><td>a tenant pointing at another ns's secrets/sources, or remote bases</td></tr>
+  <tr><th>Sub-mechanism</th><th>Flag / object</th><th>Stops</th></tr>
+  <tr><td>Identity</td><td><code>--default-service-account=default</code> + per-Kustomization <code>serviceAccountName</code></td><td>Flux applying as cluster-admin for a tenant (fails closed if no SA named)</td></tr>
+  <tr><td>RBAC scope</td><td><strong>RoleBinding</strong> (ns) vs ClusterRoleBinding (cluster)</td><td>the impersonated SA acting outside its namespace</td></tr>
+  <tr><td>Reference scope</td><td><code>--no-cross-namespace-refs</code>, <code>--no-remote-bases</code></td><td>a tenant pointing at another ns's source/Secret, or remote bases</td></tr>
 </table>
+
+<h2>3. Boundary ② — Data plane (NetworkPolicy)</h2>
+<p>RBAC never sees a packet. The pod network is flat by default; a per-tenant
+NetworkPolicy (standard <code>networking.k8s.io</code>, enforced by Cilium) allows
+ingress only from the same namespace. A drop shows as a <em>timeout</em>, not
+"refused". <code>CiliumNetworkPolicy</code> is a superset CRD, not required here.</p>
+<div class="diagram" id="d4"></div>
+
+<h2>4. Boundary ③ — Consumption (ResourceQuota + LimitRange)</h2>
+<p>ResourceQuota caps namespace totals (cpu/mem/pods + GPU via
+<code>requests.&lt;resource&gt;</code>). LimitRange is the required companion: a quota on
+<code>requests.cpu</code> rejects pods that omit a cpu request, so it supplies
+defaults + min/max. Over-quota pods are <code>Forbidden</code> at admission.</p>
+<table>
+  <tr><th></th><th>requests.cpu</th><th>requests.memory</th><th>GPU caps</th></tr>
+  <tr><td>team-a (larger)</td><td>2</td><td>2Gi</td><td><code>nvidia.com/gpu: 1</code>, <code>mig-3g.40gb: 1</code></td></tr>
+  <tr><td>team-b (smaller)</td><td>1</td><td>1Gi</td><td><code>mig-1g.10gb: 2</code></td></tr>
+</table>
+
+<h2>5. GPU isolation — MIG (spatial partitioning)</h2>
+<p>MIG carves one physical GPU into hardware-isolated slices (vs time-slicing =
+temporal, no isolation). The device-plugin advertises each slice as an extended
+resource (from the topology's <code>otherDevices</code>); pods request a slice like
+any resource; ResourceQuota caps them per tenant.</p>
+<div class="diagram" id="d5"></div>
 
 <script type="module">
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 mermaid.initialize({ startOnLoad: false, theme: 'default' });
 
 const diagrams = {
+d0: `flowchart LR
+  classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
+  classDef wall fill:#fee2e2,stroke:#991b1b,color:#7f1d1d;
+  T["team-a<br/>workloads"]:::tenant
+  C["① CONTROL PLANE<br/>RBAC + impersonation<br/>(kube-apiserver, at apply time)<br/>→ can only deploy INTO team-a"]:::wall
+  N["② DATA PLANE<br/>NetworkPolicy<br/>(Cilium, at runtime)<br/>→ can only talk WITHIN team-a"]:::wall
+  Q["③ CONSUMPTION<br/>ResourceQuota + LimitRange<br/>(kube-apiserver admission)<br/>→ capped cpu / mem / GPU"]:::wall
+  T --- C
+  T --- N
+  T --- Q`,
+
 d1: `flowchart TB
   classDef plat fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
   classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
   classDef secret fill:#fee2e2,stroke:#991b1b,color:#7f1d1d;
-
   subgraph GH["GitHub"]
     FI["fleet-infra<br/>PLATFORM repo (guardrails)"]:::plat
     TARA["tenant-team-a<br/>private · deploy/"]:::tenant
-    TBRB["tenant-team-b<br/>private · deploy/"]:::tenant
   end
-
   subgraph FS["ns: flux-system — controllers run here (cluster-admin)"]
     ROOT["Kustomization: flux-system (root)<br/>path ./clusters/hardway"]:::plat
-    INFRA["Kustomization: infrastructure"]:::plat
-    APPS["Kustomization: apps (SOPS)"]:::plat
     TEN["Kustomization: tenants (SOPS)"]:::plat
   end
-
   subgraph NSA["ns: team-a"]
-    SAA["SA team-a + RoleBinding→admin<br/>(namespace-scoped)"]:::plat
-    SECA["Secret deploy-key<br/>SOPS-decrypted by platform"]:::secret
+    GUARD["GUARDRAILS (platform-applied):<br/>Namespace · ServiceAccount · RoleBinding<br/>NetworkPolicy · ResourceQuota · LimitRange<br/>deploy-key Secret"]:::plat
     GRA["GitRepository team-a"]:::tenant
     KA["Kustomization: team-a<br/>SA=team-a · targetNamespace=team-a"]:::tenant
-    WLA["Deployment team-a-whoami<br/>+ ConfigMap team-a-config"]:::tenant
+    WLA["team-a workloads"]:::tenant
   end
-
   FI ==>|writeable bootstrap key| ROOT
-  ROOT --> INFRA & APPS & TEN
-  TEN ==>|"creates guardrails (as cluster-admin)"| SAA & SECA & GRA & KA
-  SECA -.->|SSH auth| GRA
+  ROOT --> TEN
+  TEN ==>|"creates guardrails (as cluster-admin)"| GUARD & GRA & KA
   TARA ==>|"read-only deploy key (SSH)"| GRA
   GRA -->|artifact| KA
   KA ==>|"applies AS team-a SA"| WLA`,
@@ -86,12 +125,10 @@ d2: `flowchart TB
   classDef plat fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
   classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
   classDef deny fill:#fee2e2,stroke:#991b1b,color:#7f1d1d;
-
   Q{"Kustomization sets<br/>spec.serviceAccountName?"}
   Q -->|"no"| DEF["impersonate &lt;ns&gt;:default<br/>(--default-service-account=default)<br/>powerless → FAILS CLOSED"]:::deny
-  Q -->|"yes = kustomize-controller<br/>(infrastructure / apps / tenants)"| PLAT["cluster-admin<br/>platform layer"]:::plat
-  Q -->|"yes = team-a<br/>(tenant Kustomization)"| TEN["team-a SA<br/>admin in team-a ONLY<br/>(via RoleBinding, not ClusterRoleBinding)"]:::tenant
-
+  Q -->|"yes = kustomize-controller<br/>(platform layer)"| PLAT["cluster-admin"]:::plat
+  Q -->|"yes = team-a<br/>(tenant layer)"| TEN["team-a SA<br/>admin in team-a ONLY<br/>(RoleBinding, not ClusterRoleBinding)"]:::tenant
   TEN --> OKa["create Deploy/CM/Secret<br/>inside team-a"]:::tenant
   TEN --> NOa["other namespace<br/>or cluster-scoped object<br/>DENIED by apiserver"]:::deny`,
 
@@ -100,16 +137,39 @@ d3: `sequenceDiagram
   participant SC as source-controller
   participant KC as kustomize-controller
   participant API as kube-apiserver
-
   Repo->>SC: clone deploy/ (read-only deploy key)
   SC->>KC: built artifact
   Note over KC: impersonate<br/>system:serviceaccount:team-a:team-a
   KC->>API: apply Deployment (→ team-a)
   API-->>KC: allowed (RoleBinding: admin in team-a)
-  Note over Repo,API: escape attempt (boundary demo)
+  Note over Repo,API: escape attempt
   KC->>API: apply ClusterRole (cluster-scoped)
   API-->>KC: FORBIDDEN — team-a SA cannot create clusterroles
-  Note over KC: team-a Kustomization → NotReady<br/>boundary proven, team-b unaffected`
+  Note over KC: Kustomization → NotReady · boundary proven`,
+
+d4: `flowchart LR
+  classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
+  classDef deny fill:#fee2e2,stroke:#991b1b,color:#7f1d1d;
+  subgraph A["ns team-a — NetworkPolicy: ingress from same-ns only"]
+    A1["pod"]:::tenant
+    A2["pod"]:::tenant
+  end
+  subgraph B["ns team-b — same policy"]
+    B1["pod"]:::tenant
+  end
+  A1 ==>|"same-ns ✓ allowed"| A2
+  A1 -.->|"cross-tenant ✗ DROPPED (timeout)"| B1`,
+
+d5: `flowchart TB
+  classDef tenant fill:#dcfce7,stroke:#166534,color:#14532d;
+  classDef gpu fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
+  subgraph GPU["worker-2 · one physical H100, MIG-partitioned"]
+    S1["3g.40gb slice"]:::gpu
+    S2["1g.10gb slice"]:::gpu
+    S3["1g.10gb slice"]:::gpu
+  end
+  TA["team-a job"]:::tenant -->|"requests<br/>nvidia.com/mig-3g.40gb"| S1
+  TB["team-b job"]:::tenant -->|"requests<br/>nvidia.com/mig-1g.10gb"| S2`
 };
 
 for (const [id, def] of Object.entries(diagrams)) {

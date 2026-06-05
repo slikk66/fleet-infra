@@ -422,4 +422,102 @@ Instead of imperative `kubectl run`, the smoke test is a **GitOps-managed Job** 
 > **`apps` Kustomization goes READY iff `nvidia-smi` exits 0 on the GPU.** The reconciliation *is* the proof, and it re-proves automatically on every rebuild — no out-of-band verification.
 
 Same `dependsOn`+`wait` machinery from session 2, now used as a deliberate hardware-validation gate.
+
+---
+
+## Session 8 — Multi-tenancy + MIG (2026-06-05)
+
+Full diagrams: **`docs/tenancy-architecture.md`** (or `.html`). This is the
+concept/command reference.
+
+### The model: two layers, three boundaries
+- **Two layers.** *Platform* repo (`fleet-infra`, cluster-admin) draws the
+  guardrails; each *tenant* gets its own repo and only fills the box. Guardrails
+  live in `tenants/hardway/<tenant>/`, applied by a `tenants` Flux Kustomization
+  (sibling of `infrastructure`/`apps`).
+- **Three independent boundaries** around each tenant — different mechanisms,
+  different enforcers, don't conflate:
+  1. **Control plane** (RBAC + impersonation) — *what you can deploy*. apiserver, apply-time.
+  2. **Data plane** (NetworkPolicy) — *what you can talk to*. Cilium, runtime.
+  3. **Consumption** (ResourceQuota + LimitRange) — *how much you can use*. apiserver admission.
+
+### Boundary ① — impersonation (the keystone)
+- Flux's controllers are cluster-admin. **Impersonation** makes a Kustomization
+  apply *as* a named SA, so the apiserver enforces that SA's RBAC.
+- Controller **lockdown** (JSON6902 patches in `clusters/hardway/flux-system/kustomization.yaml`
+  onto the gotk deployments):
+  - `--default-service-account=default` (kustomize + helm) — a Kustomization/HelmRelease
+    with no `serviceAccountName` impersonates the powerless `default` SA → **fails closed**.
+  - `--no-cross-namespace-refs=true` (kustomize/helm/notification) — a ref (sourceRef,
+    secretRef, chart source) may only point inside its own namespace.
+  - `--no-remote-bases=true` (kustomize) — no remote kustomize bases.
+- **The asymmetry:** platform Kustomizations set `serviceAccountName: kustomize-controller`
+  (already cluster-admin); tenant Kustomizations set `serviceAccountName: <tenant>`.
+  The default-SA flag also strands the platform's *own* Kustomizations unless pinned —
+  so `infrastructure`/`apps`/`tenants` + the bootstrap `flux-system` are pinned to
+  `kustomize-controller`. helm path is identical: platform HelmReleases name a
+  cluster-admin installer SA (`gpu-operator/helm-installer`, `kube-system/helm-installer`).
+- **RBAC scope = binding KIND, not SA namespace.** Tenant SA is `admin` via a
+  **RoleBinding** (this namespace only). A `ClusterRoleBinding` to the same role
+  would be cluster-wide. One SA can span N namespaces = N RoleBindings (subjects may
+  reference a SA from another namespace). Cluster-scoped objects (ClusterRole,
+  ClusterRoleBinding, Namespace) must have globally-unique names.
+- **Tenant repo wiring** (`tenants/hardway/<t>/sync.yaml`): a `GitRepository` (ssh,
+  `secretRef: deploy-key`) + a `Kustomization` with `serviceAccountName: <t>` and
+  `targetNamespace: <t>`, both in the tenant ns. The read-only **deploy key** is a
+  **SOPS-encrypted Secret** in the tenant ns (`deploy-key.secret.yaml`), decrypted by
+  the platform `tenants` Kustomization (`decryption.secretRef: sops-age`). Tenant repos:
+  `slikk66/tenant-team-{a,b}` (private; `deploy/` dir; `gh repo deploy-key add` read-only).
+- **Boundary demo:** a tenant manifest creating a cluster-scoped ClusterRole →
+  `Forbidden: ... cannot create clusterroles at the cluster scope` (dry-run, atomic).
+- **Verify impersonation RBAC without Flux:**
+  `kubectl auth can-i create deployments -n team-b --as=system:serviceaccount:team-a:team-a` → `no`.
+
+### Boundary ② — NetworkPolicy
+- Pod network is **flat by default** (any pod → any pod, cross-ns). One standard
+  `networking.k8s.io` `NetworkPolicy` per tenant: `podSelector: {}` +
+  `ingress: from: [{podSelector: {}}]` = default-deny + same-ns allow. Ingress only;
+  egress/DNS stay open.
+- **Cilium enforces standard NetworkPolicy** (sufficient). `CiliumNetworkPolicy` is a
+  *superset* CRD (L7, `toFQDNs`, cluster-wide) — only when standard can't express it.
+- A deny = **timeout**, not "connection refused" (packet dropped, no RST).
+- Test from an ephemeral pod (whoami is scratch, no shell):
+  `kubectl run probe -n team-a --rm -i --restart=Never --image=curlimages/curl:8.11.1 --command -- curl --max-time 5 http://<team-b-pod-ip>/`
+
+### Boundary ③ — ResourceQuota + LimitRange
+- **ResourceQuota** caps namespace totals: `requests.cpu`, `requests.memory`,
+  `limits.*`, `pods`, and GPU/extended resources via `requests.<resource>`
+  (e.g. `requests.nvidia.com/gpu`, `requests.nvidia.com/mig-3g.40gb`).
+- **LimitRange** is the **required companion**: a quota on `requests.cpu` rejects any
+  pod that omits a cpu request, so LimitRange supplies `default`/`defaultRequest` +
+  `min`/`max` per container. (Note: LimitRange can't default *extended* resources — GPU
+  pods must request explicitly.)
+- Over-quota pod → `Forbidden: exceeded quota` at **admission** (before scheduling).
+  Bare pod → gets LimitRange defaults injected. `kubectl describe resourcequota -n team-a`
+  shows Used vs Hard.
+
+### MIG (fake-gpu-operator) — spatial GPU partitioning
+- **MIG ≠ time-slicing.** MIG = hardware-isolated slices (dedicated mem/compute);
+  time-slicing = temporal sharing, no isolation. Real MIG needs A100/H100 (our A10G
+  can't); the fake operator simulates the K8s-facing model.
+- **How a slice becomes schedulable:** the device-plugin registers each
+  `otherDevices[].name` from the topology **verbatim** as an extended resource. Add a
+  separate nodePool to `fake-gpu-operator-values.yaml`:
+  ```yaml
+  nodePools:
+    mig:
+      gpuCount: 1            # remaining whole GPU
+      otherDevices:
+        - { name: nvidia.com/mig-3g.40gb, count: 1 }
+        - { name: nvidia.com/mig-1g.10gb, count: 2 }
+  ```
+  Opt a node in via the GitOps node label `run.ai/simulated-gpu-node-pool: mig`
+  (`gpu-nodes.yaml`). Pods then request `nvidia.com/mig-3g.40gb: 1`.
+- The `mig-faker` (node label `node-role.kubernetes.io/runai-dynamic-mig=true` + annotation
+  `run.ai/mig.config` = mig-parted-style YAML) fakes the GFD discovery labels/mapping —
+  but does NOT create schedulable resources; that's `otherDevices`.
+- **⚠ Static-topology smell:** the fake operator reads config at startup. After changing
+  a running node's MIG: delete the stale `topology-<node>` CM → `kubectl rollout restart
+  deploy/status-updater` → restart that node's `device-plugin` pod. Self-heals from git on
+  a fresh start.
 </content>
