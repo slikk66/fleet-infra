@@ -17,6 +17,8 @@ kind: Node
 metadata:
   name: worker-2
   labels:
-    run.ai/simulated-gpu-node-pool: default
+    # MIG demo: worker-2 joins the 'mig' nodePool → its device-plugin advertises
+    # 1 whole GPU + the MIG slices (nvidia.com/mig-3g.40gb, mig-1g.10gb).
+    run.ai/simulated-gpu-node-pool: mig
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
