@@ -1,0 +1,10 @@
+# Upstream metrics-server Helm repo. Co-located in kube-system (same ns as the
+# HelmRelease) per the --no-cross-namespace-refs lockdown.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: metrics-server
+  namespace: kube-system
+spec:
+  interval: 1h
+  url: https://kubernetes-sigs.github.io/metrics-server/

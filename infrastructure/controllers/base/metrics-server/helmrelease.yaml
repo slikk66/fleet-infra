@@ -1,0 +1,35 @@
+# metrics-server — serves the aggregated metrics.k8s.io API (kubectl top, HPA).
+# Requires the cluster API aggregation layer to be enabled on kube-apiserver
+# (hardway cluster-fix #5; NOT GitOps). On k3s clusters (aws-gpu) metrics-server
+# is built in, so this base is referenced ONLY by the hardway overlay.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metrics-server
+  namespace: kube-system
+spec:
+  interval: 15m
+  # helm-controller impersonates this cluster-admin SA (rbac.yaml) under the
+  # --default-service-account=default lockdown.
+  serviceAccountName: helm-installer
+  chart:
+    spec:
+      chart: metrics-server
+      version: "3.13.0"            # app v0.8.0
+      sourceRef:
+        kind: HelmRepository
+        name: metrics-server
+      interval: 1h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    # hardway kubelets present self-signed serving certs → skip TLS verification
+    # of the kubelet metrics endpoint. (Default kubelet-preferred-address-types
+    # already tries InternalIP first, which is the reachable address on OrbStack.)
+    args:
+      - --kubelet-insecure-tls
