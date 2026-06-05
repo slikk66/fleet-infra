@@ -33,3 +33,11 @@ spec:
     # already tries InternalIP first, which is the reachable address on OrbStack.)
     args:
       - --kubelet-insecure-tls
+    # control-1 hosts the apiserver but is NOT a Cilium node, so it cannot route
+    # to pod IPs (10.200.0.0/16) — only to node IPs (192.168.139.0/24). The
+    # aggregator's discovery probe to the metrics-server endpoint would therefore
+    # fail (APIService FailedDiscoveryCheck). hostNetwork makes the endpoint the
+    # NODE IP (reachable from control-1). Port must avoid kubelet's 10250.
+    hostNetwork:
+      enabled: true
+    containerPort: 4443
