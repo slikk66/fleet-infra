@@ -1,0 +1,32 @@
+# Gateway-API role split, encoded in RBAC (platform-owned).
+# The built-in `admin` ClusterRole (bound ns-scoped in rbac.yaml) does NOT cover
+# gateway.networking.k8s.io — those CRDs ship with NO aggregate-to-admin labels
+# (unlike Flux's CRDs, which is why the tenant can already manage HelmReleases).
+# So the PLATFORM must EXPLICITLY grant the tenant routing rights. We grant
+# HTTPRoute (+ ReferenceGrant) and DELIBERATELY NOT Gateway/GatewayClass:
+#   tenant   = developer persona -> HTTPRoute (routing only)
+#   platform = operator persona  -> Gateway   (listeners, TLS, attach policy)
+# This is the same boundary as everything else, just expressed for the GW-API CRDs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-gateway-routing
+  namespace: team-a
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "referencegrants"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-gateway-routing
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant-gateway-routing
+subjects:
+  - kind: ServiceAccount
+    name: team-a
+    namespace: team-a

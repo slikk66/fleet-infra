@@ -6,6 +6,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - rbac.yaml
+  - gateway-rbac.yaml        # grants tenant HTTPRoute (routing), NOT Gateway (listeners)
   - networkpolicy.yaml       # data-plane isolation (default-deny + same-ns allow)
   - quota.yaml               # resource isolation (ResourceQuota + LimitRange)
   - deploy-key.secret.yaml   # SOPS-encrypted read-only deploy key (decrypted by Flux)

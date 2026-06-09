@@ -1,0 +1,7 @@
+# Platform networking namespace — home of the shared Gateway-API data-plane.
+# Cilium provisions a `cilium-gateway-platform-gateway` Service here when the
+# Gateway below is created. Platform-owned; tenants have no access to it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-infra

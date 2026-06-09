@@ -1,0 +1,27 @@
+# Flux Kustomization — platform networking layer (the shared Gateway-API gateway).
+# Sibling to infrastructure.yaml / tenants.yaml; auto-discovered from ./clusters/hardway.
+#
+# Kept SEPARATE from infrastructure.yaml (which is wait:true) ON PURPOSE: on
+# bare-metal hardway the Gateway's backing LoadBalancer Service has no external-IP
+# provisioner (no cloud LB / no LB-IPAM yet), so we must NOT health-gate the whole
+# infra layer on the Gateway reaching a Ready/Programmed-with-address state.
+# wait:false = apply-and-move-on; the Gateway is still reachable via its ClusterIP.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: gateway
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  # Platform layer (creates the gateway-infra Namespace + the Gateway) → impersonate
+  # the cluster-admin kustomize-controller SA so the --default-service-account=default
+  # lockdown doesn't strand it on the powerless `default` SA.
+  serviceAccountName: kustomize-controller
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./infrastructure/gateway/hardway
+  prune: true
+  wait: false

@@ -7,3 +7,6 @@ metadata:
   name: team-a
   labels:
     toolkit.fluxcd.io/tenant: team-a
+    # Platform OPTS team-a into attaching routes to platform-gateway. The Gateway's
+    # allowedRoutes selector matches this label; team-b's ns lacks it → can't attach.
+    gateway-access: "true"

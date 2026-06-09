@@ -1,0 +1,32 @@
+# PLATFORM-OWNED Gateway (the cluster-operator persona in the Gateway API role model).
+# This object owns the LISTENERS — port, protocol, TLS, the allowed hostname set,
+# and WHICH namespaces may attach routes. Tenants never touch this; they only
+# create HTTPRoutes (the developer persona) that ATTACH here, bounded by the
+# allowedRoutes policy below. That split is the whole point of Gateway API vs Ingress:
+# the tenant gets a routing-only object; the platform keeps the policy-bearing one.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: platform-gateway
+  namespace: gateway-infra
+spec:
+  gatewayClassName: cilium          # implemented by Cilium (io.cilium/gateway-controller)
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # Hostname CONSTRAINT: an attached HTTPRoute may only serve hostnames that
+      # INTERSECT this suffix. A tenant claiming `prod.company.com` gets nothing
+      # programmed for it — hostname squatting is API-enforced, not RBAC-hoped.
+      hostname: "*.apps.hardway.local"
+      allowedRoutes:
+        # ATTACH POLICY: only namespaces the PLATFORM has labelled may attach.
+        # team-a's ns carries gateway-access=true (tenants/hardway/team-a/namespace.yaml);
+        # team-b does NOT → a team-b route is rejected `NotAllowedByListeners`.
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: "true"
+        kinds:
+          - kind: HTTPRoute
